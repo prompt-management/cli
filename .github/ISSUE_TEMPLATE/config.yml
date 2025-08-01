@@ -1,0 +1,17 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Community Discussions
+    url: https://github.com/prompt-management/cli/discussions
+    about: Ask questions, share ideas, and discuss PMC with the community
+  - name: 📚 Documentation
+    url: https://github.com/prompt-management/cli#readme
+    about: Check the README and documentation for usage help
+  - name: 🔍 Troubleshooting Guide
+    url: https://github.com/prompt-management/cli/wiki/Troubleshooting
+    about: Common issues and their solutions
+  - name: 💡 Feature Ideas
+    url: https://github.com/prompt-management/cli/discussions/categories/ideas
+    about: Share and discuss feature ideas with the community
+  - name: 🆘 General Support
+    url: https://github.com/prompt-management/cli/discussions/categories/q-a
+    about: Get help with general questions about using PMC
