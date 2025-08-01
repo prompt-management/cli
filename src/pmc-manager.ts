@@ -6,7 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import * as YAML from 'yaml';
 import chalk from 'chalk';
 import inquirer from 'inquirer';
-import { PromptEntry, PMCConfig, SearchOptions, EditOptions, GenerateOptions } from './types';
+import { PromptEntry, PMCConfig, SearchOptions, EditOptions, GenerateOptions, UninstallOptions } from './types';
 
 export class PMCManager {
   private configPath: string;
@@ -375,6 +375,105 @@ export class PMCManager {
       console.log(chalk.gray(`Total prompts in database: ${this.config.data.length}`));
     } else {
       console.log(chalk.yellow('All sample prompts already exist in the database.'));
+    }
+  }
+
+  async uninstallPMC(options: UninstallOptions): Promise<void> {
+    const installDir = path.join(os.homedir(), '.pmc-cli');
+    const binPath = path.join(os.homedir(), '.local', 'bin', 'pmc');
+    const configDir = path.join(os.homedir(), '.pmc');
+
+    console.log(chalk.yellow('⚠️  PMC Uninstallation'));
+    console.log(chalk.gray('This will remove:'));
+    console.log(chalk.gray(`  - Installation directory: ${installDir}`));
+    console.log(chalk.gray(`  - Binary symlink: ${binPath}`));
+    console.log(chalk.red(`  - Configuration and data: ${configDir}`));
+    console.log('');
+
+    let shouldUninstall = options.confirm;
+
+    if (!shouldUninstall) {
+      const { confirmUninstall } = await inquirer.prompt([
+        {
+          type: 'confirm',
+          name: 'confirmUninstall',
+          message: 'Are you sure you want to uninstall PMC? This will delete all your prompts.',
+          default: false
+        }
+      ]);
+      shouldUninstall = confirmUninstall;
+    }
+
+    if (!shouldUninstall) {
+      console.log(chalk.green('Uninstallation cancelled.'));
+      return;
+    }
+
+    console.log(chalk.blue('Uninstalling PMC...'));
+
+    try {
+      // Remove installation directory
+      if (await this.fileExists(installDir)) {
+        await fs.rm(installDir, { recursive: true, force: true });
+        console.log(chalk.gray(`✓ Removed installation directory: ${installDir}`));
+      }
+
+      // Remove binary symlink
+      if (await this.fileExists(binPath)) {
+        await fs.unlink(binPath);
+        console.log(chalk.gray(`✓ Removed binary symlink: ${binPath}`));
+      }
+
+      // Remove configuration directory
+      if (await this.fileExists(configDir)) {
+        await fs.rm(configDir, { recursive: true, force: true });
+        console.log(chalk.gray(`✓ Removed configuration directory: ${configDir}`));
+      }
+
+      // Clean up shell configurations
+      await this.cleanupShellConfigs();
+
+      console.log('');
+      console.log(chalk.green('✅ PMC has been successfully uninstalled!'));
+      console.log(chalk.yellow('Note: You may need to restart your terminal or run "hash -r" to update your PATH.'));
+      
+    } catch (error) {
+      console.error(chalk.red('❌ Error during uninstallation:'), error);
+      console.log(chalk.yellow('You may need to manually remove the following directories:'));
+      console.log(chalk.gray(`  - ${installDir}`));
+      console.log(chalk.gray(`  - ${binPath}`));
+      console.log(chalk.gray(`  - ${configDir}`));
+      process.exit(1);
+    }
+  }
+
+  private async cleanupShellConfigs(): Promise<void> {
+    const binDir = path.join(os.homedir(), '.local', 'bin');
+    const configFiles = [
+      path.join(os.homedir(), '.bashrc'),
+      path.join(os.homedir(), '.zshrc'),
+      path.join(os.homedir(), '.profile')
+    ];
+
+    for (const configFile of configFiles) {
+      if (await this.fileExists(configFile)) {
+        try {
+          const content = await fs.readFile(configFile, 'utf-8');
+          const lines = content.split('\n');
+          const filteredLines = lines.filter(line => 
+            !line.includes('# Added by PMC installer') &&
+            !line.includes(`export PATH="$PATH:${binDir}"`) &&
+            !line.includes(`export PATH="\$PATH:${binDir}"`)
+          );
+          
+          if (filteredLines.length !== lines.length) {
+            await fs.writeFile(configFile, filteredLines.join('\n'), 'utf-8');
+            console.log(chalk.gray(`✓ Cleaned up ${configFile}`));
+          }
+        } catch (error) {
+          console.log(chalk.yellow(`⚠️  Could not clean up ${configFile}: ${error}`));
+        }
+      }
     }
   }
 

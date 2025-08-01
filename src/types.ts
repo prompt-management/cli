@@ -32,3 +32,7 @@ export interface EditOptions {
 export interface GenerateOptions {
   sample?: boolean;
 }
+
+export interface UninstallOptions {
+  confirm?: boolean;
+}

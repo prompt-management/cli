@@ -54,6 +54,24 @@ npm install
 npm run dev
 ```
 
+## Uninstallation
+
+To completely remove PMC from your system:
+
+```bash
+# Interactive uninstall (with confirmation prompt)
+pmc uninstall
+
+# Uninstall without confirmation
+pmc uninstall --confirm
+```
+
+This will remove:
+- Installation directory (`~/.pmc-cli/`)
+- Binary symlink (`~/.local/bin/pmc`)
+- Configuration and all stored prompts (`~/.pmc/`)
+- PATH modifications from shell configuration files
+
 ## Usage
 
 ### Create a New Prompt
@@ -157,6 +175,8 @@ settings:
 | `pmc search` | `s` | Search prompts with filters |
 | `pmc edit` | `e` | Edit existing prompt |
 | `pmc list` | `ls` | List all prompts |
+| `pmc generate` | `g` | Generate sample prompts |
+| `pmc uninstall` | | Uninstall PMC from system |
 | `pmc --help` | `-h` | Show help information |
 
 ### Search Options

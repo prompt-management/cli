@@ -2,7 +2,7 @@
 
 import { Command } from 'commander';
 import { PMCManager } from './pmc-manager';
-import { SearchOptions, EditOptions, GenerateOptions } from './types';
+import { SearchOptions, EditOptions, GenerateOptions, UninstallOptions } from './types';
 
 const program = new Command();
 const pmc = new PMCManager();
@@ -58,6 +58,14 @@ program
   .option('--sample', 'Generate predefined sample prompts')
   .action(async (options: GenerateOptions) => {
     await pmc.generatePrompts(options);
+  });
+
+program
+  .command('uninstall')
+  .description('Uninstall PMC from the system')
+  .option('--confirm', 'Skip confirmation prompt')
+  .action(async (options: UninstallOptions) => {
+    await pmc.uninstallPMC(options);
   });
 
 program.parse();
