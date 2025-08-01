@@ -17,12 +17,18 @@ Many AI coding agent tools (Claude Code, Gemini CLI, Kiro, Cursor, GitHub Copilo
 
 ## Installation
 
-### Global Installation
+### Quick Installation (Recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/prompt-management/cli/main/install.sh | bash
+```
+
+### Manual Installation
 
 ```bash
 # Clone the repository
-git clone <repository-url>
-cd prompt-management-cli
+git clone https://github.com/prompt-management/cli.git
+cd cli
 
 # Install dependencies
 npm install
@@ -38,8 +44,8 @@ npm install -g .
 
 ```bash
 # Clone the repository
-git clone <repository-url>
-cd prompt-management-cli
+git clone https://github.com/prompt-management/cli.git
+cd cli
 
 # Install dependencies
 npm install
