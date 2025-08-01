@@ -74,6 +74,28 @@ This will remove:
 
 ## Usage
 
+### Help
+
+```bash
+$ pmc --help
+Usage: pmc [options] [command]
+
+Prompt Management CLI - A tool for managing AI prompts
+
+Options:
+  -V, --version         output the version number
+  -h, --help            display help for command
+
+Commands:
+  create                Create a new prompt (opens text editor)
+  search|s [options]    Search prompts
+  edit|e [options]      Edit an existing prompt
+  list|ls               List all prompts
+  generate|g [options]  Generate sample prompts
+  uninstall [options]   Uninstall PMC from the system
+  help [command]        display help for command
+```
+
 ### Create a New Prompt
 
 ```bash
