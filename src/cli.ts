@@ -3,7 +3,7 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import { PMCManager } from './pmc-manager';
-import { SearchOptions, EditOptions, GenerateOptions, UninstallOptions, CreateOptions, ListOptions, ShowOptions } from './types';
+import { SearchOptions, EditOptions, GenerateOptions, UninstallOptions, CreateOptions, ListOptions, ShowOptions, WatchOptions } from './types';
 
 const program = new Command();
 const pmc = new PMCManager();
@@ -108,6 +108,15 @@ program
   .option('--confirm', 'Skip confirmation prompt')
   .action(async (options: UninstallOptions) => {
     await pmc.uninstallPMC(options);
+  });
+
+program
+  .command('watch')
+  .alias('w')
+  .description('Monitor changes to prompts.md and update system metadata')
+  .option('-v, --verbose', 'Show detailed information about file changes')
+  .action(async (options: WatchOptions) => {
+    await pmc.watchPrompts(options);
   });
 
 program.parse();

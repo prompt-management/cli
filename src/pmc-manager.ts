@@ -1,13 +1,14 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
+import * as crypto from 'crypto';
 import * as toml from '@iarna/toml';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import customParseFormat from 'dayjs/plugin/customParseFormat';
 import chalk from 'chalk';
 import inquirer from 'inquirer';
-import { PromptEntry, PMCConfig, SearchOptions, EditOptions, GenerateOptions, UninstallOptions, CreateOptions, SystemMeta, ListOptions, ShowOptions } from './types';
+import { PromptEntry, PMCConfig, SearchOptions, EditOptions, GenerateOptions, UninstallOptions, CreateOptions, SystemMeta, ListOptions, ShowOptions, WatchOptions } from './types';
 
 // Initialize dayjs plugins
 dayjs.extend(relativeTime);
@@ -17,6 +18,7 @@ export class PMCManager {
   private configPath: string;
   private promptsPath: string;
   private systemMetaPath: string;
+  private hashPath: string;
   private config: PMCConfig;
 
   constructor() {
@@ -24,6 +26,7 @@ export class PMCManager {
     this.configPath = path.join(pmcDir, 'pmc-config.yml');
     this.promptsPath = path.join(pmcDir, 'prompts.md');
     this.systemMetaPath = path.join(pmcDir, 'prompts-system-meta.jsonl');
+    this.hashPath = path.join(pmcDir, '.prompts-hash');
     this.config = {
       settings: {
         colorEnabled: true,
@@ -53,6 +56,9 @@ export class PMCManager {
       if (!(await this.fileExists(this.systemMetaPath))) {
         await fs.writeFile(this.systemMetaPath, '', 'utf-8');
       }
+
+      // Auto-scan for changes on every command
+      await this.autoScanChanges();
     } catch (error) {
       console.error('Failed to initialize PMC:', error);
       process.exit(1);
@@ -745,5 +751,189 @@ category = "deployment"
       
       console.log('');
     });
+  }
+
+  async watchPrompts(options: WatchOptions = {}): Promise<void> {
+    await this.initialize();
+
+    console.log(chalk.blue('🔍 Watching prompts.md for changes...'));
+    console.log(chalk.gray(`File: ${this.promptsPath}`));
+    console.log(chalk.gray('Press Ctrl+C to stop watching\n'));
+
+    let lastModified = 0;
+    let lastPrompts: PromptEntry[] = [];
+
+    try {
+      // Get initial state
+      const stats = await fs.stat(this.promptsPath);
+      lastModified = stats.mtimeMs;
+      lastPrompts = await this.loadPrompts();
+      
+      if (options.verbose) {
+        console.log(chalk.green(`✓ Initial scan: ${lastPrompts.length} prompts found`));
+      }
+    } catch (error) {
+      console.error(chalk.red('Failed to initialize watcher:'), error);
+      return;
+    }
+
+    // Watch for changes
+    const watcher = setInterval(async () => {
+      try {
+        const stats = await fs.stat(this.promptsPath);
+        
+        if (stats.mtimeMs > lastModified) {
+          lastModified = stats.mtimeMs;
+          
+          if (options.verbose) {
+            console.log(chalk.yellow('📝 File changed, updating metadata...'));
+          }
+          
+          const currentPrompts = await this.loadPrompts();
+          await this.updateSystemMetadata(lastPrompts, currentPrompts, options.verbose);
+          lastPrompts = currentPrompts;
+          
+          console.log(chalk.green(`✓ Updated at ${new Date().toLocaleTimeString()}`));
+        }
+      } catch (error) {
+        if (options.verbose) {
+          console.error(chalk.red('Error checking file:'), error);
+        }
+      }
+    }, 1000); // Check every second
+
+    // Handle graceful shutdown
+    process.on('SIGINT', () => {
+      clearInterval(watcher);
+      console.log('\n' + chalk.blue('👋 Stopped watching prompts.md'));
+      process.exit(0);
+    });
+  }
+
+  private async updateSystemMetadata(oldPrompts: PromptEntry[], newPrompts: PromptEntry[], verbose: boolean = false): Promise<void> {
+    const systemMeta = await this.loadSystemMeta();
+    const now = new Date().toISOString();
+    const cwd = process.cwd();
+    
+    // Create maps for easier lookup
+    const newTitles = new Set(newPrompts.map(p => p.title));
+    
+    let changes = 0;
+    
+    // Process each new prompt
+    for (const prompt of newPrompts) {
+      const existing = systemMeta.get(prompt.title);
+      
+      if (!existing) {
+        // New prompt
+        systemMeta.set(prompt.title, {
+          created: now,
+          updated: now,
+          cwd
+        });
+        changes++;
+        
+        if (verbose) {
+          console.log(chalk.green(`  + Added: "${prompt.title}"`));
+        }
+      } else {
+        // Check if content changed by comparing with old prompts
+        const oldPrompt = oldPrompts.find(p => p.title === prompt.title);
+        if (oldPrompt && oldPrompt.content !== prompt.content) {
+          // Content changed
+          systemMeta.set(prompt.title, {
+            ...existing,
+            updated: now,
+            cwd
+          });
+          changes++;
+          
+          if (verbose) {
+            console.log(chalk.blue(`  ~ Modified: "${prompt.title}"`));
+          }
+        }
+      }
+    }
+    
+    // Remove metadata for deleted prompts
+    for (const [title] of systemMeta) {
+      if (!newTitles.has(title)) {
+        systemMeta.delete(title);
+        changes++;
+        
+        if (verbose) {
+          console.log(chalk.red(`  - Removed: "${title}"`));
+        }
+      }
+    }
+    
+    // Save updated metadata if there were changes
+    if (changes > 0) {
+      const updatedPrompts = newPrompts.map(prompt => ({
+        ...prompt,
+        systemMeta: systemMeta.get(prompt.title) || { created: '', updated: '', cwd: '' }
+      }));
+      
+      await this.saveSystemMeta(updatedPrompts);
+      
+      if (verbose) {
+        console.log(chalk.gray(`  📊 ${changes} change(s) processed`));
+      }
+    }
+  }
+
+  private async autoScanChanges(): Promise<void> {
+    try {
+      if (!(await this.fileExists(this.promptsPath))) {
+        return; // No prompts file to scan
+      }
+
+      const currentHash = await this.calculateFileHash(this.promptsPath);
+      const storedHash = await this.getStoredHash();
+
+      if (currentHash !== storedHash) {
+        // File has changed, need to get old state for comparison
+        const systemMeta = await this.loadSystemMeta();
+        const currentPrompts = await this.loadPrompts();
+        
+        // Create old prompts from system metadata (approximation)
+        const oldPrompts: PromptEntry[] = Array.from(systemMeta.entries()).map(([title, meta]) => ({
+          title,
+          content: '', // We don't have old content, so changes will be detected by existence/non-existence
+          userMeta: {},
+          systemMeta: meta
+        }));
+
+        await this.updateSystemMetadata(oldPrompts, currentPrompts, false);
+        await this.storeHash(currentHash);
+      }
+    } catch (error) {
+      // Silently handle errors in auto-scan to not disrupt user commands
+    }
+  }
+
+  private async calculateFileHash(filePath: string): Promise<string> {
+    try {
+      const content = await fs.readFile(filePath, 'utf-8');
+      return crypto.createHash('sha256').update(content).digest('hex');
+    } catch (error) {
+      return '';
+    }
+  }
+
+  private async getStoredHash(): Promise<string> {
+    try {
+      return await fs.readFile(this.hashPath, 'utf-8');
+    } catch (error) {
+      return '';
+    }
+  }
+
+  private async storeHash(hash: string): Promise<void> {
+    try {
+      await fs.writeFile(this.hashPath, hash, 'utf-8');
+    } catch (error) {
+      // Silently handle errors
+    }
   }
 }

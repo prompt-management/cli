@@ -55,3 +55,7 @@ export interface UninstallOptions {
 export interface CreateOptions {
   ignoreKeysDuplicatesWarning?: boolean;
 }
+
+export interface WatchOptions {
+  verbose?: boolean;
+}
