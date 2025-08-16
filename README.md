@@ -6,14 +6,18 @@ A CLI tool for managing AI prompts with search and organization capabilities. PM
 
 Many AI coding agent tools (Claude Code, Gemini CLI, Kiro, Cursor, GitHub Copilot Agent, etc.) are CLI-based. PMC eliminates the manual overhead of thinking up, remembering, or copy-pasting prompts by providing AI agents with meta-programmatic understanding of your prompt library.
 
+![PMC Screenshot](./screenshot.png)
+
 ## Features
 
-- **Personal & Secure**: Local storage in `~/.pmc/pmc.yml`
+- **Personal & Secure**: Local storage in `~/.pmc/prompts.md` 
 - **CLI-based**: Seamless integration with your terminal workflow
-- **Search & Filter**: Powerful search by directory, text content, and metadata
-- **Editor Integration**: Uses your preferred text editor (nano, vi, etc.)
-- **Human-readable Storage**: YAML format for easy manual editing
-- **UUID-based Indexing**: Unique identification for each prompt
+- **Search & Filter**: Powerful search by directory, text content, metadata, and dates
+- **Version Control**: Built-in Git integration for prompt history and collaboration
+- **File Watching**: Auto-sync metadata when prompts.md changes
+- **Custom File Support**: Use `--prompts-file` for project-specific prompt files
+- **Markdown Format**: Human-readable storage with TOML metadata
+- **Real-time Monitoring**: Watch mode for live prompt file changes
 
 ## Installation
 
@@ -83,17 +87,24 @@ Usage: pmc [options] [command]
 Prompt Management CLI - A tool for managing AI prompts
 
 Options:
-  -V, --version         output the version number
-  -h, --help            display help for command
+  -V, --version                    output the version number
+  --prompts-file <path>           specify custom prompts.md file path
+  -h, --help                      display help for command
 
 Commands:
-  create                Create a new prompt (opens text editor)
-  search|s [options]    Search prompts
-  edit|e [options]      Edit an existing prompt
-  list|ls               List all prompts
-  generate|g [options]  Generate sample prompts
-  uninstall [options]   Uninstall PMC from the system
-  help [command]        display help for command
+  create|c [options]              Create a new prompt
+  search|s [options]              Search prompts with flexible filtering
+  edit|e [options]                Edit prompts
+  list|ls [options]               List all prompts
+  show <title>                    Show full content of a prompt by exact title
+  generate|g [options]            Generate sample prompts
+  watch|w [options]               Monitor changes to prompts.md
+  history [options]               Show version history of prompts
+  diff [version1] [version2]      Show differences between prompt versions
+  restore <version> [options]     Restore prompts.md to a specific version
+  versions [options]              List all available versions
+  uninstall [options]             Uninstall PMC from the system
+  help [command]                  display help for command
 ```
 
 ### Create a New Prompt
@@ -130,131 +141,153 @@ pmc search --text "deploy" --text-regex-off
 pmc search --text "docker" --text-inverse
 ```
 
-### Edit Prompts
+### Advanced Usage
 
+#### Custom Prompts File
 ```bash
-# Edit by ID
-pmc edit --id 12345678-1234-1234-1234-123456789abc
-
-# Edit by searching for text
-pmc edit --text "docker"
-
-# Short aliases
-pmc e --id 12345678
-pmc e --text "kubernetes"
+# Use project-specific prompts file
+pmc --prompts-file ./project-prompts.md list
+pmc --prompts-file /path/to/team-prompts.md search --text "deploy"
 ```
 
-### List All Prompts
-
+#### Version Control
 ```bash
-# Show all stored prompts
-pmc list
-pmc ls
+# View prompt history
+pmc history
+pmc history -c 20  # Show 20 entries
+
+# Compare versions
+pmc diff abc123 def456
+pmc diff  # Compare latest with previous
+
+# Restore old version
+pmc restore abc123
+pmc restore abc123 --confirm  # Skip confirmation
 ```
 
-### Help
-
+#### File Watching
 ```bash
-pmc --help
-pmc -h
+# Monitor prompts.md for changes
+pmc watch
+pmc watch --verbose  # Show detailed change info
+```
+
+#### Search Examples
+```bash
+# Search by title
+pmc search --title "docker"
+
+# Search by content
+pmc search --text "kubernetes" 
+
+# Search by metadata
+pmc search --meta "tags=deployment"
+pmc search --meta "category=devops"
+
+# Search by date
+pmc search --date-after "2024-01-01"
+pmc search --date-after "7 days ago"
+
+# Search by directory
+pmc search --dir "/projects/webapp"
+
+# Combine filters
+pmc search --title "setup" --meta "tags=nodejs"
+
+# Invert search results
+pmc search --text "docker" --text-inverse
+```
+
+## File Structure
+
+```
+~/.pmc/
+├── .git/                     # Git repository for version control
+├── prompts.md               # Main prompts file (Markdown format)
+├── prompts-system-meta.jsonl # System metadata (auto-generated)
+├── pmc-config.yml           # Configuration file
+└── .prompts-hash            # File change detection (auto-generated)
+```
+
+### Prompts Format
+
+Prompts are stored in Markdown format with TOML metadata:
+
+```markdown
+# Docker Setup
+
+How to set up Docker containers with Node.js applications.
+
+<!--
+[meta]
+tags = ["docker", "nodejs", "deployment"]
+category = "devops"
+description = "Complete Docker setup guide"
+-->
+
+# Another Prompt
+
+Content here...
+
+<!--
+[meta]
+tags = ["example"]
+-->
 ```
 
 ## Configuration
 
-PMC stores all data in `~/.pmc/pmc.yml`. The file structure includes:
+PMC configuration is stored in `~/.pmc/pmc-config.yml`:
 
 ```yaml
-data:
-  - id: "12345678-1234-1234-1234-123456789abc"
-    timestamp: "2024-01-15T10:30:00.000Z"
-    cwd: "/home/user/projects/my-app"
-    prompt: |
-      Create a Docker configuration for a Node.js application
-      with the following requirements:
-      - Use Alpine Linux base image
-      - Install dependencies securely
-      - Configure proper non-root user
-    config:
-      type: "deployment"
-      env: "production"
-
 settings:
   colorEnabled: true
-  defaultEditor: "nano"
-  fallbackEditor: "vi"
+  ignoreKeysDuplicatesWarning: false
+git:
+  enabled: true
+  autoCommit: true
+  commitMessageFormat: "Update prompt: {title}"
 ```
-
-### Environment Variables
-
-- `EDITOR`: Override the default text editor
-
-## Command Reference
-
-| Command | Aliases | Description |
-|---------|---------|-------------|
-| `pmc` | | Create new prompt (opens editor) |
-| `pmc create` | | Create new prompt (explicit) |
-| `pmc search` | `s` | Search prompts with filters |
-| `pmc edit` | `e` | Edit existing prompt |
-| `pmc list` | `ls` | List all prompts |
-| `pmc generate` | `g` | Generate sample prompts |
-| `pmc uninstall` | | Uninstall PMC from system |
-| `pmc --help` | `-h` | Show help information |
-
-### Search Options
-
-| Option | Description |
-|--------|-------------|
-| `--dir <directory>` | Filter by directory path |
-| `--text <text>` | Search prompt content |
-| `--text-regex-off` | Disable regex for text search |
-| `--text-inverse` | Invert text search results |
-| `--meta <key=value>` | Filter by metadata |
-| `--meta-inverse` | Invert metadata search results |
-
-### Edit Options
-
-| Option | Description |
-|--------|-------------|
-| `--id <id>` | Edit prompt by UUID |
-| `--text <text>` | Find prompt by text content |
-
-## Data Structure
-
-Each prompt entry contains:
-
-- **id**: Unique UUID identifier
-- **timestamp**: ISO 8601 timestamp (human-readable)
-- **cwd**: Current working directory when prompt was created
-- **prompt**: The actual prompt content (supports multi-line)
-- **config**: Key-value metadata (comma-separated ini format)
 
 ## Development
 
+### Running Tests
+
 ```bash
-# Install dependencies
-npm install
+# Run all tests
+npm test
 
-# Build the project
-npm run build
+# Run tests with coverage
+npm test -- --coverage
 
-# Run in development mode
-npm run dev
+# Run specific test
+npm test -- test/utils.test.ts
 
-# Run linting
-npm run lint
+# Development installation
+chmod +x install-dev.sh
+./install-dev.sh
+```
 
-# Run type checking
-npm run typecheck
+### Test Structure
 
-# Run tests
-npm run test
+```
+test/
+├── utils.test.ts          # Utility function tests
+├── prompt-manager.test.ts # Core prompt management tests  
+├── search.test.ts         # Search functionality tests
+├── pmc-manager.test.ts    # Integration tests
+└── README.md              # Test documentation
 ```
 
 ## License
 
-MIT
+MIT License - see LICENSE file for details.
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Run tests (`npm test`)
+4. Commit your changes (`git commit -m 'Add amazing feature'`)
+5. Push to the branch (`git push origin feature/amazing-feature`)
+6. Open a Pull Request

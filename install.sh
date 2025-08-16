@@ -48,7 +48,9 @@ check_requirements() {
     fi
     
     if ! command -v git &> /dev/null; then
-        error "git is required but not installed. Please install git"
+        warning "git is recommended for version control features. Install git for full functionality"
+    else
+        success "Git found - version control features will be available"
     fi
     
     # Check Node.js version
@@ -90,6 +92,9 @@ install_pmc() {
     
     log "Building PMC..."
     npm run build --silent
+    
+    log "Running tests to verify installation..."
+    npm test --silent || warning "Some tests failed, but installation continues"
     
     success "PMC installed successfully"
 }
@@ -165,12 +170,17 @@ main() {
     success "🎉 PMC installation complete!"
     echo ""
     log "Quick start:"
-    echo "  pmc --help                    # Show help"
-    echo "  pmc generate --sample         # Generate sample prompts"
-    echo "  pmc                           # Create a new prompt"
-    echo "  pmc search --text 'docker'    # Search prompts"
+    echo "  pmc --help                         # Show help"
+    echo "  pmc generate --sample              # Generate sample prompts"
+    echo "  pmc                                # Create a new prompt"
+    echo "  pmc search --text 'docker'         # Search prompts"
+    echo "  pmc watch --verbose                # Watch for changes"
+    echo "  pmc history                        # View version history"
+    echo "  pmc --prompts-file ./my.md list    # Use custom file"
     echo ""
-    log "Configuration file: ~/.pmc/pmc.yml"
+    log "Configuration: ~/.pmc/pmc-config.yml"
+    log "Git repository: ~/.pmc/.git (for version control)"
+    log "Prompts file: ~/.pmc/prompts.md"
 }
 
 # Run installation
