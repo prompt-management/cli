@@ -16,6 +16,11 @@ export interface PMCConfig {
     colorEnabled: boolean;
     ignoreKeysDuplicatesWarning: boolean;
   };
+  git: {
+    enabled: boolean;
+    autoCommit: boolean;
+    commitMessageFormat: string;
+  };
 }
 
 export interface SearchOptions {
@@ -58,4 +63,25 @@ export interface CreateOptions {
 
 export interface WatchOptions {
   verbose?: boolean;
+}
+
+export interface HistoryOptions {
+  title?: string;
+  count?: number;
+}
+
+export interface DiffOptions {
+  title: string;
+  version1?: string;
+  version2?: string;
+}
+
+export interface RestoreOptions {
+  title: string;
+  version: string;
+  confirm?: boolean;
+}
+
+export interface VersionsOptions {
+  count?: number;
 }

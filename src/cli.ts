@@ -3,7 +3,7 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import { PMCManager } from './pmc-manager';
-import { SearchOptions, EditOptions, GenerateOptions, UninstallOptions, CreateOptions, ListOptions, ShowOptions, WatchOptions } from './types';
+import { SearchOptions, EditOptions, GenerateOptions, UninstallOptions, CreateOptions, ListOptions, ShowOptions, WatchOptions, HistoryOptions, DiffOptions, RestoreOptions, VersionsOptions } from './types';
 
 const program = new Command();
 const pmc = new PMCManager();
@@ -117,6 +117,37 @@ program
   .option('-v, --verbose', 'Show detailed information about file changes')
   .action(async (options: WatchOptions) => {
     await pmc.watchPrompts(options);
+  });
+
+program
+  .command('history')
+  .description('Show version history of prompts')
+  .option('-c, --count <number>', 'Number of history entries to show', (value) => parseInt(value), 10)
+  .action(async (options: HistoryOptions) => {
+    await pmc.promptHistory(options);
+  });
+
+program
+  .command('diff [version1] [version2]')
+  .description('Show differences between prompt versions')
+  .action(async (version1: string, version2: string) => {
+    await pmc.promptDiff({ title: '', version1, version2 });
+  });
+
+program
+  .command('restore <version>')
+  .description('Restore prompts.md to a specific version')
+  .option('--confirm', 'Skip confirmation prompt')
+  .action(async (version: string, options: Omit<RestoreOptions, 'title' | 'version'>) => {
+    await pmc.promptRestore({ title: '', version, ...options });
+  });
+
+program
+  .command('versions')
+  .description('List all available versions')
+  .option('-c, --count <number>', 'Number of versions to show', (value) => parseInt(value), 10)
+  .action(async (options: VersionsOptions) => {
+    await pmc.promptVersions(options);
   });
 
 program.parse();

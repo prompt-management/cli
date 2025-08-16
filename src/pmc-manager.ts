@@ -2,17 +2,114 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import * as crypto from 'crypto';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import * as toml from '@iarna/toml';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import customParseFormat from 'dayjs/plugin/customParseFormat';
 import chalk from 'chalk';
 import inquirer from 'inquirer';
-import { PromptEntry, PMCConfig, SearchOptions, EditOptions, GenerateOptions, UninstallOptions, CreateOptions, SystemMeta, ListOptions, ShowOptions, WatchOptions } from './types';
+import { PromptEntry, PMCConfig, SearchOptions, EditOptions, GenerateOptions, UninstallOptions, CreateOptions, SystemMeta, ListOptions, ShowOptions, WatchOptions, HistoryOptions, DiffOptions, RestoreOptions, VersionsOptions } from './types';
 
 // Initialize dayjs plugins
 dayjs.extend(relativeTime);
 dayjs.extend(customParseFormat);
+
+const execAsync = promisify(exec);
+
+class GitManager {
+  private repoPath: string;
+
+  constructor(repoPath: string) {
+    this.repoPath = repoPath;
+  }
+
+  private async runGit(command: string): Promise<string> {
+    try {
+      const { stdout } = await execAsync(`git ${command}`, { cwd: this.repoPath });
+      return stdout.trim();
+    } catch (error: any) {
+      throw new Error(`Git command failed: ${error.message}`);
+    }
+  }
+
+  async isGitInstalled(): Promise<boolean> {
+    try {
+      await execAsync('git --version');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async isInitialized(): Promise<boolean> {
+    try {
+      await this.runGit('rev-parse --git-dir');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async initialize(): Promise<void> {
+    await this.runGit('init');
+    await this.runGit('config user.name "PMC"');
+    await this.runGit('config user.email "pmc@local"');
+    
+    // Create .gitignore
+    const gitignorePath = path.join(this.repoPath, '.gitignore');
+    await fs.writeFile(gitignorePath, [
+      'prompts-system-meta.jsonl',
+      '.prompts-hash',
+      'pmc-config.yml'
+    ].join('\n'), 'utf-8');
+    
+    await this.runGit('add .gitignore');
+    await this.runGit('commit -m "Initial commit"');
+  }
+
+  async addAndCommit(message: string): Promise<void> {
+    await this.runGit('add prompts.md');
+    try {
+      await this.runGit(`commit -m "${message.replace(/"/g, '\\"')}"`);
+    } catch (error: any) {
+      if (!error.message.includes('nothing to commit')) {
+        throw error;
+      }
+    }
+  }
+
+  async getHistory(count: number = 10): Promise<Array<{hash: string, date: string, message: string}>> {
+    try {
+      const output = await this.runGit(`log --oneline --max-count=${count} --pretty=format:"%h|%ad|%s" --date=short`);
+      return output.split('\n').map(line => {
+        const [hash, date, message] = line.split('|');
+        return { hash, date, message };
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  async getDiff(version1?: string, version2?: string): Promise<string> {
+    const v1 = version1 || 'HEAD~1';
+    const v2 = version2 || 'HEAD';
+    try {
+      return await this.runGit(`diff ${v1} ${v2} -- prompts.md`);
+    } catch {
+      return '';
+    }
+  }
+
+  async showVersion(version: string): Promise<string> {
+    try {
+      return await this.runGit(`show ${version}:prompts.md`);
+    } catch {
+      return '';
+    }
+  }
+}
 
 export class PMCManager {
   private configPath: string;
@@ -20,6 +117,7 @@ export class PMCManager {
   private systemMetaPath: string;
   private hashPath: string;
   private config: PMCConfig;
+  private git: GitManager;
 
   constructor() {
     const pmcDir = path.join(os.homedir(), '.pmc');
@@ -27,10 +125,16 @@ export class PMCManager {
     this.promptsPath = path.join(pmcDir, 'prompts.md');
     this.systemMetaPath = path.join(pmcDir, 'prompts-system-meta.jsonl');
     this.hashPath = path.join(pmcDir, '.prompts-hash');
+    this.git = new GitManager(pmcDir);
     this.config = {
       settings: {
         colorEnabled: true,
         ignoreKeysDuplicatesWarning: false
+      },
+      git: {
+        enabled: true,
+        autoCommit: true,
+        commitMessageFormat: "Update prompt: {title}"
       }
     };
   }
@@ -55,6 +159,11 @@ export class PMCManager {
       // Initialize system metadata file if it doesn't exist
       if (!(await this.fileExists(this.systemMetaPath))) {
         await fs.writeFile(this.systemMetaPath, '', 'utf-8');
+      }
+
+      // Initialize Git repository if enabled
+      if (this.config.git.enabled) {
+        await this.initializeGit();
       }
 
       // Auto-scan for changes on every command
@@ -810,7 +919,7 @@ category = "deployment"
     });
   }
 
-  private async updateSystemMetadata(oldPrompts: PromptEntry[], newPrompts: PromptEntry[], verbose: boolean = false): Promise<void> {
+  private async updateSystemMetadata(oldPrompts: PromptEntry[], newPrompts: PromptEntry[], verbose: boolean = false): Promise<string[]> {
     const systemMeta = await this.loadSystemMeta();
     const now = new Date().toISOString();
     const cwd = process.cwd();
@@ -819,6 +928,7 @@ category = "deployment"
     const newTitles = new Set(newPrompts.map(p => p.title));
     
     let changes = 0;
+    const changedTitles: string[] = [];
     
     // Process each new prompt
     for (const prompt of newPrompts) {
@@ -832,6 +942,7 @@ category = "deployment"
           cwd
         });
         changes++;
+        changedTitles.push(prompt.title);
         
         if (verbose) {
           console.log(chalk.green(`  + Added: "${prompt.title}"`));
@@ -847,6 +958,7 @@ category = "deployment"
             cwd
           });
           changes++;
+          changedTitles.push(prompt.title);
           
           if (verbose) {
             console.log(chalk.blue(`  ~ Modified: "${prompt.title}"`));
@@ -860,6 +972,7 @@ category = "deployment"
       if (!newTitles.has(title)) {
         systemMeta.delete(title);
         changes++;
+        changedTitles.push(`${title} (deleted)`);
         
         if (verbose) {
           console.log(chalk.red(`  - Removed: "${title}"`));
@@ -880,6 +993,8 @@ category = "deployment"
         console.log(chalk.gray(`  📊 ${changes} change(s) processed`));
       }
     }
+    
+    return changedTitles;
   }
 
   private async autoScanChanges(): Promise<void> {
@@ -904,7 +1019,8 @@ category = "deployment"
           systemMeta: meta
         }));
 
-        await this.updateSystemMetadata(oldPrompts, currentPrompts, false);
+        const changedTitles = await this.updateSystemMetadata(oldPrompts, currentPrompts, false);
+        await this.commitChanges(changedTitles);
         await this.storeHash(currentHash);
       }
     } catch (error) {
@@ -935,5 +1051,137 @@ category = "deployment"
     } catch (error) {
       // Silently handle errors
     }
+  }
+
+  private async initializeGit(): Promise<void> {
+    try {
+      if (!(await this.git.isGitInstalled())) {
+        console.log(chalk.yellow('⚠️  Git is not installed. Version control features disabled.'));
+        this.config.git.enabled = false;
+        return;
+      }
+
+      if (!(await this.git.isInitialized())) {
+        await this.git.initialize();
+        
+        // Initial commit with prompts.md
+        if (await this.fileExists(this.promptsPath)) {
+          await this.git.addAndCommit('Initial PMC setup');
+        }
+      }
+    } catch (error) {
+      console.log(chalk.yellow('⚠️  Failed to initialize Git. Version control features disabled.'));
+      this.config.git.enabled = false;
+    }
+  }
+
+  private async commitChanges(changedTitles: string[]): Promise<void> {
+    if (!this.config.git.enabled || !this.config.git.autoCommit) {
+      return;
+    }
+
+    try {
+      let message = this.config.git.commitMessageFormat;
+      
+      if (changedTitles.length === 1) {
+        message = message.replace('{title}', changedTitles[0]);
+      } else if (changedTitles.length > 1) {
+        message = `Update ${changedTitles.length} prompts`;
+      } else {
+        message = 'Update prompts';
+      }
+
+      await this.git.addAndCommit(message);
+    } catch (error) {
+      // Silently handle git errors to not disrupt user workflow
+    }
+  }
+
+  async promptHistory(options: HistoryOptions): Promise<void> {
+    await this.initialize();
+
+    if (!this.config.git.enabled) {
+      console.log(chalk.yellow('Git version control is disabled. Enable it in config to use history features.'));
+      return;
+    }
+
+    const history = await this.git.getHistory(options.count || 10);
+    
+    if (history.length === 0) {
+      console.log(chalk.yellow('No version history found.'));
+      return;
+    }
+
+    console.log(chalk.blue(`📚 Prompt History (${history.length} entries):\n`));
+    
+    history.forEach((entry, index) => {
+      console.log(chalk.cyan(`[${index + 1}] ${entry.hash}`) + chalk.gray(` (${entry.date}) `) + entry.message);
+    });
+  }
+
+  async promptDiff(options: DiffOptions): Promise<void> {
+    await this.initialize();
+
+    if (!this.config.git.enabled) {
+      console.log(chalk.yellow('Git version control is disabled. Enable it in config to use diff features.'));
+      return;
+    }
+
+    const diff = await this.git.getDiff(options.version1, options.version2);
+    
+    if (!diff) {
+      console.log(chalk.yellow('No differences found.'));
+      return;
+    }
+
+    console.log(chalk.blue('📊 Diff:'));
+    console.log(diff);
+  }
+
+  async promptRestore(options: RestoreOptions): Promise<void> {
+    await this.initialize();
+
+    if (!this.config.git.enabled) {
+      console.log(chalk.yellow('Git version control is disabled. Enable it in config to use restore features.'));
+      return;
+    }
+
+    const content = await this.git.showVersion(options.version);
+    
+    if (!content) {
+      console.log(chalk.red(`❌ Version "${options.version}" not found.`));
+      return;
+    }
+
+    let shouldRestore = options.confirm;
+
+    if (!shouldRestore) {
+      const { confirmRestore } = await inquirer.prompt([
+        {
+          type: 'confirm',
+          name: 'confirmRestore',
+          message: `Are you sure you want to restore prompts.md to version "${options.version}"?`,
+          default: false
+        }
+      ]);
+      shouldRestore = confirmRestore;
+    }
+
+    if (!shouldRestore) {
+      console.log(chalk.green('Restore cancelled.'));
+      return;
+    }
+
+    try {
+      await fs.writeFile(this.promptsPath, content, 'utf-8');
+      await this.git.addAndCommit(`Restore to version ${options.version}`);
+      console.log(chalk.green(`✓ Restored prompts.md to version "${options.version}"`));
+    } catch (error) {
+      console.error(chalk.red('❌ Failed to restore:'), error);
+    }
+  }
+
+  async promptVersions(options: VersionsOptions): Promise<void> {
+    await this.promptHistory({ count: options.count });
   }
 }
