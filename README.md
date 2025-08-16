@@ -27,6 +27,20 @@ Many AI coding agent tools (Claude Code, Gemini CLI, Kiro, Cursor, GitHub Copilo
 curl -fsSL https://raw.githubusercontent.com/prompt-management/cli/main/install.sh | bash
 ```
 
+### Upgrade
+
+The same command works for upgrades! The installer automatically detects existing installations and safely upgrades while preserving your data:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/prompt-management/cli/main/install.sh | bash
+```
+
+**What happens during upgrade:**
+- ✅ Automatic backup of your prompts and settings
+- ✅ Git repository preservation
+- ✅ Safe rollback if upgrade fails
+- ✅ All user data preserved
+
 ### Manual Installation
 
 ```bash

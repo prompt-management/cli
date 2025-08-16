@@ -16,6 +16,8 @@ NC='\033[0m' # No Color
 REPO_URL="https://github.com/prompt-management/cli"
 INSTALL_DIR="$HOME/.pmc-cli"
 BIN_DIR="$HOME/.local/bin"
+PMC_DATA_DIR="$HOME/.pmc"
+BACKUP_DIR="$PMC_DATA_DIR/backup-$(date +%Y%m%d-%H%M%S)"
 
 # Functions
 log() {
@@ -33,6 +35,71 @@ warning() {
 error() {
     echo -e "${RED}[PMC Installer]${NC} $1"
     exit 1
+}
+
+# Check if PMC is already installed
+check_existing_installation() {
+    if [ -d "$INSTALL_DIR" ] || command -v pmc &> /dev/null; then
+        return 0  # Exists
+    else
+        return 1  # Does not exist
+    fi
+}
+
+# Get current PMC version
+get_current_version() {
+    if command -v pmc &> /dev/null; then
+        pmc --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown"
+    else
+        echo "none"
+    fi
+}
+
+# Backup user data
+backup_user_data() {
+    if [ -d "$PMC_DATA_DIR" ]; then
+        log "Creating backup of user data..."
+        mkdir -p "$BACKUP_DIR"
+        
+        # Backup important files
+        for file in "prompts.md" "pmc-config.yml" "prompts-system-meta.jsonl"; do
+            if [ -f "$PMC_DATA_DIR/$file" ]; then
+                cp "$PMC_DATA_DIR/$file" "$BACKUP_DIR/"
+                log "Backed up $file"
+            fi
+        done
+        
+        # Backup .git directory if it exists
+        if [ -d "$PMC_DATA_DIR/.git" ]; then
+            cp -r "$PMC_DATA_DIR/.git" "$BACKUP_DIR/"
+            log "Backed up Git repository"
+        fi
+        
+        success "Backup created at $BACKUP_DIR"
+        return 0
+    else
+        log "No existing data directory found, skipping backup"
+        return 1
+    fi
+}
+
+# Restore user data from backup if installation fails
+restore_backup() {
+    if [ -d "$BACKUP_DIR" ]; then
+        warning "Installation failed, restoring backup..."
+        
+        for file in "prompts.md" "pmc-config.yml" "prompts-system-meta.jsonl"; do
+            if [ -f "$BACKUP_DIR/$file" ]; then
+                cp "$BACKUP_DIR/$file" "$PMC_DATA_DIR/"
+            fi
+        done
+        
+        if [ -d "$BACKUP_DIR/.git" ]; then
+            cp -r "$BACKUP_DIR/.git" "$PMC_DATA_DIR/"
+        fi
+        
+        success "Backup restored"
+    fi
 }
 
 # Check requirements
@@ -78,25 +145,44 @@ create_directories() {
 
 # Clone and install
 install_pmc() {
-    log "Cloning PMC repository..."
+    local is_upgrade=$1
     
+    if [ "$is_upgrade" = "true" ]; then
+        log "Upgrading PMC repository..."
+    else
+        log "Cloning PMC repository..."
+    fi
+    
+    # Remove old installation directory
     if [ -d "$INSTALL_DIR" ]; then
         rm -rf "$INSTALL_DIR"
     fi
     
-    git clone "$REPO_URL" "$INSTALL_DIR" --quiet
+    # Clone fresh copy
+    if ! git clone "$REPO_URL" "$INSTALL_DIR" --quiet; then
+        error "Failed to clone repository. Please check your internet connection."
+    fi
+    
+    cd "$INSTALL_DIR"
     
     log "Installing dependencies..."
-    cd "$INSTALL_DIR"
-    npm install --silent --no-fund
+    if ! npm install --silent --no-fund; then
+        error "Failed to install dependencies"
+    fi
     
     log "Building PMC..."
-    npm run build --silent
+    if ! npm run build --silent; then
+        error "Failed to build PMC"
+    fi
     
     log "Running tests to verify installation..."
     npm test --silent || warning "Some tests failed, but installation continues"
     
-    success "PMC installed successfully"
+    if [ "$is_upgrade" = "true" ]; then
+        success "PMC upgraded successfully"
+    else
+        success "PMC installed successfully"
+    fi
 }
 
 # Create symlink
@@ -157,17 +243,54 @@ verify_installation() {
 
 # Main installation process
 main() {
-    log "Starting PMC installation..."
+    local is_upgrade=false
+    local current_version="none"
+    local backup_created=false
+    
+    # Check if this is an upgrade
+    if check_existing_installation; then
+        is_upgrade=true
+        current_version=$(get_current_version)
+        
+        echo ""
+        log "🔄 PMC upgrade detected!"
+        log "Current version: $current_version"
+        echo ""
+        
+        # Create backup of user data
+        if backup_user_data; then
+            backup_created=true
+        fi
+    else
+        log "Starting fresh PMC installation..."
+    fi
+    
+    # Set up error handling for upgrades
+    if [ "$backup_created" = "true" ]; then
+        trap 'restore_backup' ERR
+    fi
     
     check_requirements
     create_directories
-    install_pmc
+    install_pmc "$is_upgrade"
     create_symlink
     update_path
     verify_installation
     
+    # Clear the error trap
+    trap - ERR
+    
     echo ""
-    success "🎉 PMC installation complete!"
+    if [ "$is_upgrade" = "true" ]; then
+        success "🎉 PMC upgrade complete!"
+        log "Upgraded from version $current_version"
+        if [ "$backup_created" = "true" ]; then
+            log "Backup saved at: $BACKUP_DIR"
+        fi
+    else
+        success "🎉 PMC installation complete!"
+    fi
+    
     echo ""
     log "Quick start:"
     echo "  pmc --help                         # Show help"
@@ -181,6 +304,13 @@ main() {
     log "Configuration: ~/.pmc/pmc-config.yml"
     log "Git repository: ~/.pmc/.git (for version control)"
     log "Prompts file: ~/.pmc/prompts.md"
+    
+    if [ "$is_upgrade" = "true" ] && [ "$backup_created" = "true" ]; then
+        echo ""
+        log "Your prompts and settings have been preserved during the upgrade."
+        log "If you encounter any issues, restore from backup:"
+        echo "  cp $BACKUP_DIR/* ~/.pmc/"
+    fi
 }
 
 # Run installation

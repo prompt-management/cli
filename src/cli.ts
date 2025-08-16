@@ -6,7 +6,12 @@ import { PMCManager } from './pmc-manager';
 import { SearchOptions, EditOptions, GenerateOptions, UninstallOptions, CreateOptions, ListOptions, ShowOptions, WatchOptions, HistoryOptions, DiffOptions, RestoreOptions, VersionsOptions } from './types';
 
 const program = new Command();
-let pmc: PMCManager;
+
+// Helper function to get PMC instance with options
+function getPMC(): PMCManager {
+  const options = program.opts();
+  return new PMCManager(options.promptsFile);
+}
 
 program
   .name('pmc')
@@ -20,7 +25,7 @@ program
   .description('Create a new prompt (edit prompts.md file directly)')
   .option('--ignore-duplicates-warning', 'Ignore duplicate title warnings')
   .action(async (options: CreateOptions) => {
-    await pmc.createPrompt(options);
+    await getPMC().createPrompt(options);
   });
 
 program
@@ -65,7 +70,7 @@ program
       console.log('  • --meta "language=typescript" # Any TOML field from prompts');
       return;
     }
-    await pmc.searchPrompts(options);
+    await getPMC().searchPrompts(options);
   });
 
 program
@@ -75,7 +80,7 @@ program
   .option('--title <title>', 'Search for prompt by title')
   .option('--text <text>', 'Text to search for when selecting prompt to edit')
   .action(async (options: EditOptions) => {
-    await pmc.editPrompt(options);
+    await getPMC().editPrompt(options);
   });
 
 program
@@ -84,14 +89,14 @@ program
   .description('List all prompts')
   .option('--only-titles', 'Show only prompt titles (compact view)')
   .action(async (options: ListOptions) => {
-    await pmc.listPrompts(options);
+    await getPMC().listPrompts(options);
   });
 
 program
   .command('show <title>')
   .description('Show full content of a prompt by exact title')
   .action(async (title: string) => {
-    await pmc.showPrompt({ title });
+    await getPMC().showPrompt({ title });
   });
 
 program
@@ -100,7 +105,7 @@ program
   .description('Generate sample prompts')
   .option('--sample', 'Generate predefined sample prompts')
   .action(async (options: GenerateOptions) => {
-    await pmc.generatePrompts(options);
+    await getPMC().generatePrompts(options);
   });
 
 program
@@ -108,7 +113,7 @@ program
   .description('Uninstall PMC from the system')
   .option('--confirm', 'Skip confirmation prompt')
   .action(async (options: UninstallOptions) => {
-    await pmc.uninstallPMC(options);
+    await getPMC().uninstallPMC(options);
   });
 
 program
@@ -117,7 +122,7 @@ program
   .description('Monitor changes to prompts.md and update system metadata')
   .option('-v, --verbose', 'Show detailed information about file changes')
   .action(async (options: WatchOptions) => {
-    await pmc.watchPrompts(options);
+    await getPMC().watchPrompts(options);
   });
 
 program
@@ -125,14 +130,14 @@ program
   .description('Show version history of prompts')
   .option('-c, --count <number>', 'Number of history entries to show', (value) => parseInt(value), 10)
   .action(async (options: HistoryOptions) => {
-    await pmc.promptHistory(options);
+    await getPMC().promptHistory(options);
   });
 
 program
   .command('diff [version1] [version2]')
   .description('Show differences between prompt versions')
   .action(async (version1: string, version2: string) => {
-    await pmc.promptDiff({ title: '', version1, version2 });
+    await getPMC().promptDiff({ title: '', version1, version2 });
   });
 
 program
@@ -140,7 +145,7 @@ program
   .description('Restore prompts.md to a specific version')
   .option('--confirm', 'Skip confirmation prompt')
   .action(async (version: string, options: Omit<RestoreOptions, 'title' | 'version'>) => {
-    await pmc.promptRestore({ title: '', version, ...options });
+    await getPMC().promptRestore({ title: '', version, ...options });
   });
 
 program
@@ -148,15 +153,11 @@ program
   .description('List all available versions')
   .option('-c, --count <number>', 'Number of versions to show', (value) => parseInt(value), 10)
   .action(async (options: VersionsOptions) => {
-    await pmc.promptVersions(options);
+    await getPMC().promptVersions(options);
   });
 
 program.parse();
 
-// Initialize PMC with custom prompts file if specified
-const options = program.opts();
-pmc = new PMCManager(options.promptsFile);
-
 if (!process.argv.slice(2).length) {
-  pmc.createPrompt();
+  getPMC().createPrompt();
 }
