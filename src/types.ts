@@ -1,17 +1,20 @@
 export interface PromptEntry {
-  id: string;
-  timestamp: string;
+  title: string;
+  content: string;
+  userMeta: Record<string, any>;
+  systemMeta: SystemMeta;
+}
+
+export interface SystemMeta {
+  created: string;
+  updated: string;
   cwd: string;
-  prompt: string;
-  config: Record<string, string>;
 }
 
 export interface PMCConfig {
-  data: PromptEntry[];
   settings: {
     colorEnabled: boolean;
-    defaultEditor: string;
-    fallbackEditor: string;
+    ignoreKeysDuplicatesWarning: boolean;
   };
 }
 
@@ -22,10 +25,22 @@ export interface SearchOptions {
   textInverse?: boolean;
   meta?: string;
   metaInverse?: boolean;
+  title?: string;
+  dateAfter?: string;
+  dateBefore?: string;
+  contentMaxLength?: number;
+}
+
+export interface ShowOptions {
+  title: string;
+}
+
+export interface ListOptions {
+  onlyTitles?: boolean;
 }
 
 export interface EditOptions {
-  id?: string;
+  title?: string;
   text?: string;
 }
 
@@ -35,4 +50,8 @@ export interface GenerateOptions {
 
 export interface UninstallOptions {
   confirm?: boolean;
+}
+
+export interface CreateOptions {
+  ignoreKeysDuplicatesWarning?: boolean;
 }

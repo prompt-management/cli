@@ -1,37 +1,57 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
-import { spawn } from 'child_process';
-import { v4 as uuidv4 } from 'uuid';
-import * as YAML from 'yaml';
+import * as toml from '@iarna/toml';
+import dayjs from 'dayjs';
+import relativeTime from 'dayjs/plugin/relativeTime';
+import customParseFormat from 'dayjs/plugin/customParseFormat';
 import chalk from 'chalk';
 import inquirer from 'inquirer';
-import { PromptEntry, PMCConfig, SearchOptions, EditOptions, GenerateOptions, UninstallOptions } from './types';
+import { PromptEntry, PMCConfig, SearchOptions, EditOptions, GenerateOptions, UninstallOptions, CreateOptions, SystemMeta, ListOptions, ShowOptions } from './types';
+
+// Initialize dayjs plugins
+dayjs.extend(relativeTime);
+dayjs.extend(customParseFormat);
 
 export class PMCManager {
   private configPath: string;
+  private promptsPath: string;
+  private systemMetaPath: string;
   private config: PMCConfig;
 
   constructor() {
-    this.configPath = path.join(os.homedir(), '.pmc', 'pmc.yml');
+    const pmcDir = path.join(os.homedir(), '.pmc');
+    this.configPath = path.join(pmcDir, 'pmc-config.yml');
+    this.promptsPath = path.join(pmcDir, 'prompts.md');
+    this.systemMetaPath = path.join(pmcDir, 'prompts-system-meta.jsonl');
     this.config = {
-      data: [],
       settings: {
         colorEnabled: true,
-        defaultEditor: 'nano',
-        fallbackEditor: 'vi'
+        ignoreKeysDuplicatesWarning: false
       }
     };
   }
 
   async initialize(): Promise<void> {
     try {
-      await fs.mkdir(path.dirname(this.configPath), { recursive: true });
+      const pmcDir = path.dirname(this.configPath);
+      await fs.mkdir(pmcDir, { recursive: true });
       
-      if (await this.fileExists(this.configPath)) {
-        await this.loadConfig();
-      } else {
+      // Initialize config file
+      if (!(await this.fileExists(this.configPath))) {
         await this.saveConfig();
+      } else {
+        await this.loadConfig();
+      }
+
+      // Initialize prompts.md if it doesn't exist
+      if (!(await this.fileExists(this.promptsPath))) {
+        await fs.writeFile(this.promptsPath, '# Welcome to PMC\n\nThis file contains your prompts. Edit directly with your favorite editor!\n\n<!--\n[meta]\ndescription = "Welcome prompt for PMC"\ntags = ["welcome", "pmc"]\n-->\n\n', 'utf-8');
+      }
+
+      // Initialize system metadata file if it doesn't exist
+      if (!(await this.fileExists(this.systemMetaPath))) {
+        await fs.writeFile(this.systemMetaPath, '', 'utf-8');
       }
     } catch (error) {
       console.error('Failed to initialize PMC:', error);
@@ -51,7 +71,8 @@ export class PMCManager {
   private async loadConfig(): Promise<void> {
     try {
       const content = await fs.readFile(this.configPath, 'utf-8');
-      this.config = YAML.parse(content) || this.config;
+      const parsed = JSON.parse(content);
+      this.config = { ...this.config, ...parsed };
     } catch (error) {
       console.error('Failed to load config:', error);
     }
@@ -59,192 +80,267 @@ export class PMCManager {
 
   private async saveConfig(): Promise<void> {
     try {
-      const yamlContent = YAML.stringify(this.config, { lineWidth: 0 });
-      await fs.writeFile(this.configPath, yamlContent, 'utf-8');
+      const jsonContent = JSON.stringify(this.config, null, 2);
+      await fs.writeFile(this.configPath, jsonContent, 'utf-8');
     } catch (error) {
       console.error('Failed to save config:', error);
     }
   }
 
-  async createPrompt(): Promise<void> {
-    await this.initialize();
-
-    const tempFile = path.join(os.tmpdir(), `pmc-${Date.now()}.txt`);
-    
+  private async loadPrompts(): Promise<PromptEntry[]> {
     try {
-      await this.openEditor(tempFile);
-      
-      const promptContent = await fs.readFile(tempFile, 'utf-8');
-      
-      if (promptContent.trim()) {
-        const entry: PromptEntry = {
-          id: uuidv4(),
-          timestamp: new Date().toISOString(),
-          cwd: process.cwd(),
-          prompt: promptContent.trim(),
-          config: {}
-        };
-
-        this.config.data.push(entry);
-        await this.saveConfig();
-        
-        console.log(chalk.green(`✓ Prompt saved with ID: ${entry.id}`));
-      } else {
-        console.log(chalk.yellow('No content entered, prompt not saved.'));
-      }
-    } finally {
-      try {
-        await fs.unlink(tempFile);
-      } catch {}
+      const markdownContent = await fs.readFile(this.promptsPath, 'utf-8');
+      return this.parseMarkdownPrompts(markdownContent);
+    } catch (error) {
+      console.error('Failed to load prompts:', error);
+      return [];
     }
   }
 
-  private async openEditor(filePath: string): Promise<void> {
-    const editor = process.env.EDITOR || this.config.settings.defaultEditor;
+  private parseMarkdownPrompts(content: string): PromptEntry[] {
+    const prompts: PromptEntry[] = [];
+    const sections = content.split(/^# /gm).filter(s => s.trim());
     
-    return new Promise((resolve, reject) => {
-      const editorProcess = spawn(editor, [filePath], {
-        stdio: 'inherit'
-      });
-
-      editorProcess.on('close', (code) => {
-        if (code === 0) {
-          resolve();
-        } else {
-          const fallbackEditor = this.config.settings.fallbackEditor;
-          if (editor !== fallbackEditor) {
-            console.log(chalk.yellow(`${editor} failed, trying ${fallbackEditor}...`));
-            
-            const fallbackProcess = spawn(fallbackEditor, [filePath], {
-              stdio: 'inherit'
-            });
-
-            fallbackProcess.on('close', (fallbackCode) => {
-              if (fallbackCode === 0) {
-                resolve();
-              } else {
-                reject(new Error(`Both ${editor} and ${fallbackEditor} failed`));
-              }
-            });
-          } else {
-            reject(new Error(`Editor ${editor} exited with code ${code}`));
-          }
+    for (const section of sections) {
+      const lines = section.split('\n');
+      const title = lines[0].trim();
+      
+      // Extract metadata comment
+      const metaMatch = section.match(/<!--\s*\n?\[meta\]\s*\n([\s\S]*?)\n?\s*-->/);
+      let userMeta: Record<string, any> = {};
+      
+      if (metaMatch) {
+        try {
+          userMeta = toml.parse(metaMatch[1]);
+        } catch (error) {
+          console.warn(chalk.yellow(`Warning: Invalid TOML metadata in prompt "${title}"`));
         }
-      });
+      }
 
-      editorProcess.on('error', (error) => {
-        reject(error);
-      });
-    });
+      // Extract content (everything except the title and metadata comment)
+      let content = section.replace(/<!--\s*\n?\[meta\]\s*\n[\s\S]*?\n?\s*-->/g, '').trim();
+      // Remove the title line
+      content = content.split('\n').slice(1).join('\n').trim();
+      
+      if (title && content) {
+        prompts.push({
+          title,
+          content,
+          userMeta,
+          systemMeta: { created: '', updated: '', cwd: '' } // Will be loaded separately
+        });
+      }
+    }
+
+    return prompts;
+  }
+
+  private async loadSystemMeta(): Promise<Map<string, SystemMeta>> {
+    const systemMeta = new Map<string, SystemMeta>();
+    
+    try {
+      const content = await fs.readFile(this.systemMetaPath, 'utf-8');
+      const lines = content.split('\n').filter(line => line.trim());
+      
+      for (const line of lines) {
+        try {
+          const entry = JSON.parse(line);
+          if (entry.title) {
+            systemMeta.set(entry.title, {
+              created: entry.created || '',
+              updated: entry.updated || '',
+              cwd: entry.cwd || ''
+            });
+          }
+        } catch (error) {
+          console.warn(chalk.yellow(`Warning: Invalid JSON line in system metadata`));
+        }
+      }
+    } catch (error) {
+      // File doesn't exist or is empty, that's ok
+    }
+
+    return systemMeta;
+  }
+
+  private async saveSystemMeta(prompts: PromptEntry[]): Promise<void> {
+    try {
+      const lines = prompts.map(prompt => 
+        JSON.stringify({
+          title: prompt.title,
+          created: prompt.systemMeta.created,
+          updated: prompt.systemMeta.updated,
+          cwd: prompt.systemMeta.cwd
+        })
+      );
+      
+      await fs.writeFile(this.systemMetaPath, lines.join('\n'), 'utf-8');
+    } catch (error) {
+      console.error('Failed to save system metadata:', error);
+    }
+  }
+
+  async createPrompt(options: CreateOptions = {}): Promise<void> {
+    console.log(chalk.blue('📝 Creating a new prompt'));
+    console.log(chalk.gray('Edit the prompts.md file directly with your favorite editor.'));
+    console.log(chalk.gray(`File location: ${this.promptsPath}`));
+    console.log('');
+    console.log(chalk.yellow('Format:'));
+    console.log('# Your Prompt Title');
+    console.log('');
+    console.log('Your prompt content here...');
+    console.log('');
+    console.log('<!--');
+    console.log('[meta]');
+    console.log('description = "Description of your prompt"');
+    console.log('tags = ["tag1", "tag2"]');
+    console.log('-->');
   }
 
   async searchPrompts(options: SearchOptions): Promise<void> {
     await this.initialize();
+    
+    const prompts = await this.loadPrompts();
+    const systemMeta = await this.loadSystemMeta();
+    
+    // Combine system metadata with prompts
+    const enrichedPrompts = prompts.map(prompt => ({
+      ...prompt,
+      systemMeta: systemMeta.get(prompt.title) || { created: '', updated: '', cwd: '' }
+    }));
 
-    let results = [...this.config.data];
+    let results = [...enrichedPrompts];
 
+    // Filter by directory
     if (options.dir) {
-      results = results.filter(entry => 
-        options.textInverse ? !entry.cwd.includes(options.dir!) : entry.cwd.includes(options.dir!)
-      );
+      results = results.filter(prompt => {
+        const cwd = prompt.systemMeta.cwd || '';
+        const matches = cwd.includes(options.dir!);
+        return options.textInverse ? !matches : matches;
+      });
     }
 
+    // Filter by text content
     if (options.text) {
       const searchRegex = options.textRegexOff ? 
         new RegExp(options.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') :
         new RegExp(options.text, 'i');
       
-      results = results.filter(entry => {
-        const matches = searchRegex.test(entry.prompt);
+      results = results.filter(prompt => {
+        const matches = searchRegex.test(prompt.content);
         return options.textInverse ? !matches : matches;
       });
     }
 
+    // Filter by title
+    if (options.title) {
+      const titleRegex = new RegExp(options.title, 'i');
+      results = results.filter(prompt => titleRegex.test(prompt.title));
+    }
+
+    // Filter by date range
+    if (options.dateAfter || options.dateBefore) {
+      results = results.filter(prompt => {
+        const createdDate = dayjs(prompt.systemMeta.created);
+        if (!createdDate.isValid()) return true; // Include if no valid date
+        
+        if (options.dateAfter) {
+          const afterDate = this.parseDate(options.dateAfter);
+          if (afterDate && createdDate.isBefore(afterDate)) {
+            return false;
+          }
+        }
+        
+        if (options.dateBefore) {
+          const beforeDate = this.parseDate(options.dateBefore);
+          if (beforeDate && createdDate.isAfter(beforeDate)) {
+            return false;
+          }
+        }
+        
+        return true;
+      });
+    }
+
+    // Filter by metadata
     if (options.meta) {
       const [key, value] = options.meta.split('=');
-      results = results.filter(entry => {
-        const matches = entry.config[key] === value;
+      results = results.filter(prompt => {
+        const userMetaValue = prompt.userMeta[key];
+        let matches = false;
+        
+        if (Array.isArray(userMetaValue)) {
+          matches = userMetaValue.includes(value);
+        } else {
+          matches = String(userMetaValue) === value;
+        }
+        
         return options.metaInverse ? !matches : matches;
       });
     }
 
-    this.displayResults(results);
+    this.displayResults(results, options.contentMaxLength);
+  }
+
+  async showPrompt(options: ShowOptions): Promise<void> {
+    await this.initialize();
+    
+    const prompts = await this.loadPrompts();
+    const systemMeta = await this.loadSystemMeta();
+    
+    // Find exact title match
+    const found = prompts.find(prompt => prompt.title === options.title);
+    
+    if (!found) {
+      console.log(chalk.red(`❌ No prompt found with exact title: "${options.title}"`));
+      console.log(chalk.gray('Use "pmc list --only-titles" to see available titles'));
+      console.log(chalk.gray('Or use "pmc search --title <pattern>" for partial matches'));
+      return;
+    }
+    
+    // Combine with system metadata
+    const enrichedPrompt = {
+      ...found,
+      systemMeta: systemMeta.get(found.title) || { created: '', updated: '', cwd: '' }
+    };
+    
+    this.displaySinglePrompt(enrichedPrompt);
   }
 
   async editPrompt(options: EditOptions): Promise<void> {
-    await this.initialize();
-
-    let targetEntry: PromptEntry | null = null;
-
-    if (options.id) {
-      targetEntry = this.config.data.find(entry => entry.id === options.id) || null;
-    } else if (options.text) {
-      const searchRegex = new RegExp(options.text, 'i');
-      const matches = this.config.data.filter(entry => searchRegex.test(entry.prompt));
-      
-      if (matches.length === 0) {
-        console.log(chalk.red('No prompts found matching the search text.'));
-        return;
-      } else if (matches.length === 1) {
-        targetEntry = matches[0];
-      } else {
-        targetEntry = await this.selectFromMultiple(matches);
-      }
-    } else {
-      console.log(chalk.red('Please provide either --id or --text option.'));
-      return;
-    }
-
-    if (!targetEntry) {
-      console.log(chalk.red('Prompt not found.'));
-      return;
-    }
-
-    const tempFile = path.join(os.tmpdir(), `pmc-edit-${Date.now()}.txt`);
+    console.log(chalk.blue('📝 Editing prompts'));
+    console.log(chalk.gray('Edit the prompts.md file directly with your favorite editor.'));
+    console.log(chalk.gray(`File location: ${this.promptsPath}`));
     
-    try {
-      await fs.writeFile(tempFile, targetEntry.prompt, 'utf-8');
-      await this.openEditor(tempFile);
+    if (options.title) {
+      const prompts = await this.loadPrompts();
+      const found = prompts.find(p => p.title.toLowerCase().includes(options.title!.toLowerCase()));
       
-      const updatedContent = await fs.readFile(tempFile, 'utf-8');
-      
-      if (updatedContent.trim() !== targetEntry.prompt) {
-        targetEntry.prompt = updatedContent.trim();
-        targetEntry.timestamp = new Date().toISOString();
-        await this.saveConfig();
-        
-        console.log(chalk.green(`✓ Prompt ${targetEntry.id} updated successfully.`));
+      if (found) {
+        console.log(chalk.green(`Found prompt: "${found.title}"`));
       } else {
-        console.log(chalk.yellow('No changes made.'));
+        console.log(chalk.yellow(`No prompt found matching title: "${options.title}"`));
       }
-    } finally {
-      try {
-        await fs.unlink(tempFile);
-      } catch {}
     }
   }
 
-  private async selectFromMultiple(entries: PromptEntry[]): Promise<PromptEntry | null> {
-    const choices = entries.map(entry => ({
-      name: `${entry.id.substring(0, 8)} - ${entry.prompt.substring(0, 50)}${entry.prompt.length > 50 ? '...' : ''}`,
-      value: entry
+  async listPrompts(options: ListOptions = {}): Promise<void> {
+    await this.initialize();
+    
+    const prompts = await this.loadPrompts();
+    const systemMeta = await this.loadSystemMeta();
+    
+    // Combine system metadata with prompts
+    const enrichedPrompts = prompts.map(prompt => ({
+      ...prompt,
+      systemMeta: systemMeta.get(prompt.title) || { created: '', updated: '', cwd: '' }
     }));
 
-    const { selectedEntry } = await inquirer.prompt([
-      {
-        type: 'list',
-        name: 'selectedEntry',
-        message: 'Multiple prompts found. Select one to edit:',
-        choices
-      }
-    ]);
-
-    return selectedEntry;
-  }
-
-  async listPrompts(): Promise<void> {
-    await this.initialize();
-    this.displayResults(this.config.data);
+    if (options.onlyTitles) {
+      this.displayTitlesOnly(enrichedPrompts);
+    } else {
+      this.displayResults(enrichedPrompts);
+    }
   }
 
   async generatePrompts(options: GenerateOptions): Promise<void> {
@@ -259,135 +355,153 @@ export class PMCManager {
   }
 
   private async generateSamplePrompts(): Promise<void> {
-    const samplePrompts: Omit<PromptEntry, 'id' | 'timestamp'>[] = [
-      {
-        cwd: '/home/user/projects/web-app',
-        prompt: `Create a Docker configuration for a Node.js application with the following requirements:
+    const sampleMarkdown = `# github setup (general)
+
+To make the project public on GitHub, follow these steps:
+1. setup .git/config with username and email: neko, neko@example.com
+2. create a new repository on GitHub with \`gh repo create\`
+3. configure the repository settings, such as description, homepage, and topics with \`gh repo edit\`
+4. wait 5 seconds so human can read the above steps
+5. push the local repository to GitHub with \`git push -u origin main\`
+
+<!-- 
+[meta]
+description = "This is a general guide for setting up a public repository on GitHub."
+tags = ["github", "setup", "general"]
+-->
+
+# github setup (private)
+
+Run \`pmc search "github setup (general)"\` to see and understand the general steps for setting up a public repository on GitHub.
+But for this time, we will create a private repository instead.
+Note that:
+- Instead of \`gh repo create\`, we will use \`gh repo create --private\`
+- The rest of the steps remain the same.
+
+<!-- 
+[meta]
+description = "Guide for setting up a private repository on GitHub"
+tags = ["github", "setup", "private"]
+-->
+
+# nodejs initial setup
+
+To set up a Node.js project, follow these steps:
+1. Initialize a new Node.js project with \`npm init -y\`
+2. Make sure to use the following dependencies for TypeScript and Node.js:
+
+\`\`\`json
+"devDependencies": {
+  "@types/node": "^24.2.1",
+  "tsx": "^4.20.4",
+  "typescript": "^5.9.2"
+}
+\`\`\`
+
+3. Create a .vscode/launch.json (if not exists) file with the following content:
+
+\`\`\`json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Launch Program",
+      "program": "\${workspaceFolder}/src/index.ts"
+    }
+  ]
+}
+\`\`\`
+
+<!-- 
+[meta]
+description = "Complete setup guide for Node.js projects with TypeScript"
+tags = ["nodejs", "typescript", "setup", "vscode"]
+language = "typescript"
+-->
+
+# docker node.js setup
+
+Create a Docker configuration for a Node.js application with the following requirements:
 - Use Alpine Linux base image for smaller size
 - Install dependencies securely 
 - Configure proper non-root user
 - Expose port 3000
-- Use multi-stage build for optimization`,
-        config: {
-          type: 'deployment',
-          env: 'production',
-          category: 'docker'
-        }
-      },
-      {
-        cwd: '/home/user/projects/api-service',
-        prompt: `Generate comprehensive unit tests for a REST API with these specifications:
-- Test all CRUD operations
-- Mock external dependencies
-- Include error handling scenarios  
-- Validate request/response schemas
-- Achieve 90%+ code coverage`,
-        config: {
-          type: 'testing',
-          framework: 'jest',
-          category: 'api'
-        }
-      },
-      {
-        cwd: '/home/user/projects/frontend',
-        prompt: `Implement a responsive navigation component with:
-- Mobile hamburger menu
-- Dropdown submenus
-- Active state highlighting
-- Accessibility compliance (ARIA)
-- CSS-in-JS or styled-components
-- TypeScript interfaces`,
-        config: {
-          type: 'component',
-          framework: 'react',
-          category: 'ui'
-        }
-      },
-      {
-        cwd: '/home/user/projects/database',
-        prompt: `Design a database schema for a blog platform including:
-- Users table with authentication
-- Posts with categories and tags
-- Comments with threading support
-- Proper indexing for performance
-- Foreign key relationships
-- Migration scripts`,
-        config: {
-          type: 'database',
-          db: 'postgresql',
-          category: 'schema'
-        }
-      },
-      {
-        cwd: '/home/user/projects/devops',
-        prompt: `Create a CI/CD pipeline configuration that:
-- Runs tests on pull requests
-- Builds Docker images on merge
-- Deploys to staging automatically
-- Requires manual approval for production
-- Includes security scanning
-- Sends notifications on failure`,
-        config: {
-          type: 'cicd',
-          platform: 'github-actions',
-          category: 'automation'
-        }
-      },
-      {
-        cwd: '/home/user/projects/monitoring',
-        prompt: `Set up application monitoring and logging with:
-- Structured JSON logging
-- Error tracking and alerting  
-- Performance metrics collection
-- Database query monitoring
-- Health check endpoints
-- Dashboard creation`,
-        config: {
-          type: 'monitoring',
-          tools: 'prometheus,grafana',
-          category: 'observability'
+- Use multi-stage build for optimization
+
+\`\`\`dockerfile
+FROM node:18-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
+
+FROM node:18-alpine
+RUN addgroup -g 1001 -S nodejs
+RUN adduser -S nextjs -u 1001
+WORKDIR /app
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules ./node_modules
+COPY --chown=nextjs:nodejs . .
+USER nextjs
+EXPOSE 3000
+CMD ["npm", "start"]
+\`\`\`
+
+<!-- 
+[meta]
+description = "Docker setup for Node.js applications with security best practices"
+tags = ["docker", "nodejs", "deployment", "security"]
+category = "deployment"
+-->
+`;
+
+    try {
+      // Check if prompts.md already has substantial content (more than just welcome message)
+      if (await this.fileExists(this.promptsPath)) {
+        const existingContent = await fs.readFile(this.promptsPath, 'utf-8');
+        const promptsFromExisting = this.parseMarkdownPrompts(existingContent);
+        
+        if (promptsFromExisting.length > 1 || (promptsFromExisting.length === 1 && !promptsFromExisting[0].title.includes('Welcome'))) {
+          console.log(chalk.yellow('prompts.md already has content. Sample prompts not added.'));
+          console.log(chalk.gray('To see sample format, check the documentation.'));
+          return;
         }
       }
-    ];
 
-    let addedCount = 0;
+      await fs.writeFile(this.promptsPath, sampleMarkdown, 'utf-8');
+      
+      // Create corresponding system metadata
+      const now = new Date().toISOString();
+      const cwd = process.cwd();
+      
+      const systemMetaEntries = [
+        { title: 'github setup (general)', created: now, updated: now, cwd },
+        { title: 'github setup (private)', created: now, updated: now, cwd },
+        { title: 'nodejs initial setup', created: now, updated: now, cwd },
+        { title: 'docker node.js setup', created: now, updated: now, cwd }
+      ];
 
-    for (const samplePrompt of samplePrompts) {
-      const existingPrompt = this.config.data.find(entry => 
-        entry.prompt === samplePrompt.prompt
-      );
+      const jsonLines = systemMetaEntries.map(entry => JSON.stringify(entry));
+      await fs.writeFile(this.systemMetaPath, jsonLines.join('\n'), 'utf-8');
 
-      if (!existingPrompt) {
-        const newEntry: PromptEntry = {
-          id: uuidv4(),
-          timestamp: new Date().toISOString(),
-          ...samplePrompt
-        };
-
-        this.config.data.push(newEntry);
-        addedCount++;
-      }
-    }
-
-    if (addedCount > 0) {
-      await this.saveConfig();
-      console.log(chalk.green(`✓ Generated ${addedCount} sample prompts successfully.`));
-      console.log(chalk.gray(`Total prompts in database: ${this.config.data.length}`));
-    } else {
-      console.log(chalk.yellow('All sample prompts already exist in the database.'));
+      console.log(chalk.green('✓ Generated sample prompts successfully.'));
+      console.log(chalk.gray(`Edit prompts at: ${this.promptsPath}`));
+      
+    } catch (error) {
+      console.error(chalk.red('Failed to generate sample prompts:'), error);
     }
   }
 
   async uninstallPMC(options: UninstallOptions): Promise<void> {
+    const pmcDir = path.join(os.homedir(), '.pmc');
     const installDir = path.join(os.homedir(), '.pmc-cli');
     const binPath = path.join(os.homedir(), '.local', 'bin', 'pmc');
-    const configDir = path.join(os.homedir(), '.pmc');
 
     console.log(chalk.yellow('⚠️  PMC Uninstallation'));
     console.log(chalk.gray('This will remove:'));
     console.log(chalk.gray(`  - Installation directory: ${installDir}`));
     console.log(chalk.gray(`  - Binary symlink: ${binPath}`));
-    console.log(chalk.red(`  - Configuration and data: ${configDir}`));
+    console.log(chalk.red(`  - Configuration and prompts: ${pmcDir}`));
     console.log('');
 
     let shouldUninstall = options.confirm;
@@ -425,9 +539,9 @@ export class PMCManager {
       }
 
       // Remove configuration directory
-      if (await this.fileExists(configDir)) {
-        await fs.rm(configDir, { recursive: true, force: true });
-        console.log(chalk.gray(`✓ Removed configuration directory: ${configDir}`));
+      if (await this.fileExists(pmcDir)) {
+        await fs.rm(pmcDir, { recursive: true, force: true });
+        console.log(chalk.gray(`✓ Removed configuration directory: ${pmcDir}`));
       }
 
       // Clean up shell configurations
@@ -442,7 +556,7 @@ export class PMCManager {
       console.log(chalk.yellow('You may need to manually remove the following directories:'));
       console.log(chalk.gray(`  - ${installDir}`));
       console.log(chalk.gray(`  - ${binPath}`));
-      console.log(chalk.gray(`  - ${configDir}`));
+      console.log(chalk.gray(`  - ${pmcDir}`));
       process.exit(1);
     }
   }
@@ -477,7 +591,113 @@ export class PMCManager {
     }
   }
 
-  private displayResults(results: PromptEntry[]): void {
+  private parseDate(dateStr: string): dayjs.Dayjs | null {
+    // Try different date formats
+    const formats = [
+      'YYYY-MM-DD',
+      'YYYY-MM-DD HH:mm',
+      'YYYY-MM-DD HH:mm:ss',
+      'MM/DD/YYYY',
+      'DD/MM/YYYY'
+    ];
+    
+    // Try standard formats first
+    for (const format of formats) {
+      const parsed = dayjs(dateStr, format, true);
+      if (parsed.isValid()) {
+        return parsed;
+      }
+    }
+    
+    // Try relative time parsing
+    const now = dayjs();
+    const relativeParsing = [
+      { pattern: /(\d+)\s*days?\s*ago/i, unit: 'day' },
+      { pattern: /(\d+)\s*weeks?\s*ago/i, unit: 'week' },
+      { pattern: /(\d+)\s*months?\s*ago/i, unit: 'month' },
+      { pattern: /(\d+)\s*years?\s*ago/i, unit: 'year' },
+      { pattern: /(\d+)\s*hours?\s*ago/i, unit: 'hour' },
+      { pattern: /(\d+)\s*minutes?\s*ago/i, unit: 'minute' }
+    ];
+    
+    for (const { pattern, unit } of relativeParsing) {
+      const match = dateStr.match(pattern);
+      if (match) {
+        const amount = parseInt(match[1]);
+        return now.subtract(amount, unit as any);
+      }
+    }
+    
+    // Special cases
+    if (dateStr.toLowerCase() === 'today') {
+      return now.startOf('day');
+    }
+    if (dateStr.toLowerCase() === 'yesterday') {
+      return now.subtract(1, 'day').startOf('day');
+    }
+    if (dateStr.toLowerCase() === 'last week') {
+      return now.subtract(1, 'week').startOf('week');
+    }
+    if (dateStr.toLowerCase() === 'last month') {
+      return now.subtract(1, 'month').startOf('month');
+    }
+    
+    console.warn(chalk.yellow(`Warning: Could not parse date "${dateStr}"`));
+    return null;
+  }
+
+  private displayTitlesOnly(results: PromptEntry[]): void {
+    if (results.length === 0) {
+      console.log(chalk.yellow('No prompts found.'));
+      return;
+    }
+
+    console.log(chalk.blue(`Found ${results.length} prompt(s):\n`));
+    
+    results.forEach((prompt, index) => {
+      const dateStr = prompt.systemMeta.created ? 
+        dayjs(prompt.systemMeta.created).format('YYYY-MM-DD') : 
+        'no-date';
+      
+      console.log(chalk.cyan(`[${index + 1}]`) + ` ${prompt.title} ` + chalk.gray(`(${dateStr})`));
+    });
+    
+    console.log('');
+    console.log(chalk.gray('Use "pmc list" for detailed view or "pmc search --title <pattern>" to filter.'));
+  }
+
+  private displaySinglePrompt(prompt: PromptEntry): void {
+    console.log(chalk.cyan(`📄 ${prompt.title}`));
+    console.log('');
+    
+    if (prompt.systemMeta.created) {
+      console.log(chalk.gray(`Created: ${dayjs(prompt.systemMeta.created).format('YYYY-MM-DD HH:mm:ss')}`));
+    }
+    if (prompt.systemMeta.updated) {
+      console.log(chalk.gray(`Updated: ${dayjs(prompt.systemMeta.updated).format('YYYY-MM-DD HH:mm:ss')}`));
+    }
+    if (prompt.systemMeta.cwd) {
+      console.log(chalk.gray(`Directory: ${prompt.systemMeta.cwd}`));
+    }
+    
+    // Display user metadata
+    if (Object.keys(prompt.userMeta).length > 0) {
+      const metaEntries = Object.entries(prompt.userMeta).map(([k, v]) => {
+        if (Array.isArray(v)) {
+          return `${k}=[${v.join(', ')}]`;
+        }
+        return `${k}=${v}`;
+      });
+      console.log(chalk.gray(`Metadata: ${metaEntries.join(', ')}`));
+    }
+    
+    console.log('');
+    console.log(chalk.blue('Content:'));
+    console.log(chalk.white(prompt.content));
+    console.log('');
+  }
+
+  private displayResults(results: PromptEntry[], contentMaxLength: number = 100): void {
     if (results.length === 0) {
       console.log(chalk.yellow('No prompts found.'));
       return;
@@ -485,14 +705,42 @@ export class PMCManager {
 
     console.log(chalk.blue(`Found ${results.length} prompt(s):\n`));
 
-    results.forEach((entry, index) => {
-      console.log(chalk.cyan(`[${index + 1}] ID: ${entry.id}`));
-      console.log(chalk.gray(`    Timestamp: ${entry.timestamp}`));
-      console.log(chalk.gray(`    Directory: ${entry.cwd}`));
-      console.log(chalk.white(`    Prompt: ${entry.prompt.substring(0, 100)}${entry.prompt.length > 100 ? '...' : ''}`));
+    results.forEach((prompt, index) => {
+      console.log(chalk.cyan(`[${index + 1}] ${prompt.title}`));
       
-      if (Object.keys(entry.config).length > 0) {
-        console.log(chalk.gray(`    Config: ${Object.entries(entry.config).map(([k, v]) => `${k}=${v}`).join(', ')}`));
+      if (prompt.systemMeta.created) {
+        console.log(chalk.gray(`    Created: ${prompt.systemMeta.created}`));
+      }
+      if (prompt.systemMeta.updated) {
+        console.log(chalk.gray(`    Updated: ${prompt.systemMeta.updated}`));
+      }
+      if (prompt.systemMeta.cwd) {
+        console.log(chalk.gray(`    Directory: ${prompt.systemMeta.cwd}`));
+      }
+      
+      // Display content with controlled length
+      let contentDisplay: string;
+      if (contentMaxLength === -1) {
+        // Show full content
+        contentDisplay = prompt.content;
+      } else {
+        // Show truncated content
+        contentDisplay = prompt.content.substring(0, contentMaxLength);
+        if (prompt.content.length > contentMaxLength) {
+          contentDisplay += '...';
+        }
+      }
+      console.log(chalk.white(`    Content: ${contentDisplay}`));
+      
+      // Display user metadata
+      if (Object.keys(prompt.userMeta).length > 0) {
+        const metaEntries = Object.entries(prompt.userMeta).map(([k, v]) => {
+          if (Array.isArray(v)) {
+            return `${k}=[${v.join(', ')}]`;
+          }
+          return `${k}=${v}`;
+        });
+        console.log(chalk.gray(`    Meta: ${metaEntries.join(', ')}`));
       }
       
       console.log('');
