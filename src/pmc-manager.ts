@@ -1,115 +1,15 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
-import * as crypto from 'crypto';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import * as toml from '@iarna/toml';
-import dayjs from 'dayjs';
-import relativeTime from 'dayjs/plugin/relativeTime';
-import customParseFormat from 'dayjs/plugin/customParseFormat';
 import chalk from 'chalk';
 import inquirer from 'inquirer';
-import { PromptEntry, PMCConfig, SearchOptions, EditOptions, GenerateOptions, UninstallOptions, CreateOptions, SystemMeta, ListOptions, ShowOptions, WatchOptions, HistoryOptions, DiffOptions, RestoreOptions, VersionsOptions } from './types';
-
-// Initialize dayjs plugins
-dayjs.extend(relativeTime);
-dayjs.extend(customParseFormat);
-
-const execAsync = promisify(exec);
-
-class GitManager {
-  private repoPath: string;
-
-  constructor(repoPath: string) {
-    this.repoPath = repoPath;
-  }
-
-  private async runGit(command: string): Promise<string> {
-    try {
-      const { stdout } = await execAsync(`git ${command}`, { cwd: this.repoPath });
-      return stdout.trim();
-    } catch (error: any) {
-      throw new Error(`Git command failed: ${error.message}`);
-    }
-  }
-
-  async isGitInstalled(): Promise<boolean> {
-    try {
-      await execAsync('git --version');
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  async isInitialized(): Promise<boolean> {
-    try {
-      await this.runGit('rev-parse --git-dir');
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  async initialize(): Promise<void> {
-    await this.runGit('init');
-    await this.runGit('config user.name "PMC"');
-    await this.runGit('config user.email "pmc@local"');
-    
-    // Create .gitignore
-    const gitignorePath = path.join(this.repoPath, '.gitignore');
-    await fs.writeFile(gitignorePath, [
-      'prompts-system-meta.jsonl',
-      '.prompts-hash',
-      'pmc-config.yml'
-    ].join('\n'), 'utf-8');
-    
-    await this.runGit('add .gitignore');
-    await this.runGit('commit -m "Initial commit"');
-  }
-
-  async addAndCommit(message: string): Promise<void> {
-    await this.runGit('add prompts.md');
-    try {
-      await this.runGit(`commit -m "${message.replace(/"/g, '\\"')}"`);
-    } catch (error: any) {
-      if (!error.message.includes('nothing to commit')) {
-        throw error;
-      }
-    }
-  }
-
-  async getHistory(count: number = 10): Promise<Array<{hash: string, date: string, message: string}>> {
-    try {
-      const output = await this.runGit(`log --oneline --max-count=${count} --pretty=format:"%h|%ad|%s" --date=short`);
-      return output.split('\n').map(line => {
-        const [hash, date, message] = line.split('|');
-        return { hash, date, message };
-      });
-    } catch {
-      return [];
-    }
-  }
-
-  async getDiff(version1?: string, version2?: string): Promise<string> {
-    const v1 = version1 || 'HEAD~1';
-    const v2 = version2 || 'HEAD';
-    try {
-      return await this.runGit(`diff ${v1} ${v2} -- prompts.md`);
-    } catch {
-      return '';
-    }
-  }
-
-  async showVersion(version: string): Promise<string> {
-    try {
-      return await this.runGit(`show ${version}:prompts.md`);
-    } catch {
-      return '';
-    }
-  }
-}
+import { PMCConfig, SearchOptions, EditOptions, GenerateOptions, UninstallOptions, CreateOptions, ListOptions, ShowOptions, WatchOptions, HistoryOptions, DiffOptions, RestoreOptions, VersionsOptions } from './types';
+import { GitManager } from './git-manager';
+import { PromptManager } from './prompt-manager';
+import { DisplayManager } from './display';
+import { SearchManager } from './search';
+import { VersionCommands } from './version-commands';
+import { fileExists, calculateFileHash, formatCommitMessage } from './utils';
 
 export class PMCManager {
   private configPath: string;
@@ -118,6 +18,10 @@ export class PMCManager {
   private hashPath: string;
   private config: PMCConfig;
   private git: GitManager;
+  private promptManager: PromptManager;
+  private displayManager: DisplayManager;
+  private searchManager: SearchManager;
+  private versionCommands: VersionCommands;
 
   constructor() {
     const pmcDir = path.join(os.homedir(), '.pmc');
@@ -125,7 +29,6 @@ export class PMCManager {
     this.promptsPath = path.join(pmcDir, 'prompts.md');
     this.systemMetaPath = path.join(pmcDir, 'prompts-system-meta.jsonl');
     this.hashPath = path.join(pmcDir, '.prompts-hash');
-    this.git = new GitManager(pmcDir);
     this.config = {
       settings: {
         colorEnabled: true,
@@ -137,6 +40,13 @@ export class PMCManager {
         commitMessageFormat: "Update prompt: {title}"
       }
     };
+    
+    // Initialize managers
+    this.git = new GitManager(pmcDir);
+    this.promptManager = new PromptManager(this.promptsPath, this.systemMetaPath);
+    this.displayManager = new DisplayManager();
+    this.searchManager = new SearchManager();
+    this.versionCommands = new VersionCommands(this.git, this.config, this.promptsPath);
   }
 
   async initialize(): Promise<void> {
@@ -145,21 +55,15 @@ export class PMCManager {
       await fs.mkdir(pmcDir, { recursive: true });
       
       // Initialize config file
-      if (!(await this.fileExists(this.configPath))) {
+      if (!(await fileExists(this.configPath))) {
         await this.saveConfig();
       } else {
         await this.loadConfig();
       }
 
-      // Initialize prompts.md if it doesn't exist
-      if (!(await this.fileExists(this.promptsPath))) {
-        await fs.writeFile(this.promptsPath, '# Welcome to PMC\n\nThis file contains your prompts. Edit directly with your favorite editor!\n\n<!--\n[meta]\ndescription = "Welcome prompt for PMC"\ntags = ["welcome", "pmc"]\n-->\n\n', 'utf-8');
-      }
-
-      // Initialize system metadata file if it doesn't exist
-      if (!(await this.fileExists(this.systemMetaPath))) {
-        await fs.writeFile(this.systemMetaPath, '', 'utf-8');
-      }
+      // Initialize prompt files
+      await this.promptManager.initializePromptsFile();
+      await this.promptManager.initializeSystemMetaFile();
 
       // Initialize Git repository if enabled
       if (this.config.git.enabled) {
@@ -171,15 +75,6 @@ export class PMCManager {
     } catch (error) {
       console.error('Failed to initialize PMC:', error);
       process.exit(1);
-    }
-  }
-
-  private async fileExists(filePath: string): Promise<boolean> {
-    try {
-      await fs.access(filePath);
-      return true;
-    } catch {
-      return false;
     }
   }
 
@@ -199,99 +94,6 @@ export class PMCManager {
       await fs.writeFile(this.configPath, jsonContent, 'utf-8');
     } catch (error) {
       console.error('Failed to save config:', error);
-    }
-  }
-
-  private async loadPrompts(): Promise<PromptEntry[]> {
-    try {
-      const markdownContent = await fs.readFile(this.promptsPath, 'utf-8');
-      return this.parseMarkdownPrompts(markdownContent);
-    } catch (error) {
-      console.error('Failed to load prompts:', error);
-      return [];
-    }
-  }
-
-  private parseMarkdownPrompts(content: string): PromptEntry[] {
-    const prompts: PromptEntry[] = [];
-    const sections = content.split(/^# /gm).filter(s => s.trim());
-    
-    for (const section of sections) {
-      const lines = section.split('\n');
-      const title = lines[0].trim();
-      
-      // Extract metadata comment
-      const metaMatch = section.match(/<!--\s*\n?\[meta\]\s*\n([\s\S]*?)\n?\s*-->/);
-      let userMeta: Record<string, any> = {};
-      
-      if (metaMatch) {
-        try {
-          userMeta = toml.parse(metaMatch[1]);
-        } catch (error) {
-          console.warn(chalk.yellow(`Warning: Invalid TOML metadata in prompt "${title}"`));
-        }
-      }
-
-      // Extract content (everything except the title and metadata comment)
-      let content = section.replace(/<!--\s*\n?\[meta\]\s*\n[\s\S]*?\n?\s*-->/g, '').trim();
-      // Remove the title line
-      content = content.split('\n').slice(1).join('\n').trim();
-      
-      if (title && content) {
-        prompts.push({
-          title,
-          content,
-          userMeta,
-          systemMeta: { created: '', updated: '', cwd: '' } // Will be loaded separately
-        });
-      }
-    }
-
-    return prompts;
-  }
-
-  private async loadSystemMeta(): Promise<Map<string, SystemMeta>> {
-    const systemMeta = new Map<string, SystemMeta>();
-    
-    try {
-      const content = await fs.readFile(this.systemMetaPath, 'utf-8');
-      const lines = content.split('\n').filter(line => line.trim());
-      
-      for (const line of lines) {
-        try {
-          const entry = JSON.parse(line);
-          if (entry.title) {
-            systemMeta.set(entry.title, {
-              created: entry.created || '',
-              updated: entry.updated || '',
-              cwd: entry.cwd || ''
-            });
-          }
-        } catch (error) {
-          console.warn(chalk.yellow(`Warning: Invalid JSON line in system metadata`));
-        }
-      }
-    } catch (error) {
-      // File doesn't exist or is empty, that's ok
-    }
-
-    return systemMeta;
-  }
-
-  private async saveSystemMeta(prompts: PromptEntry[]): Promise<void> {
-    try {
-      const lines = prompts.map(prompt => 
-        JSON.stringify({
-          title: prompt.title,
-          created: prompt.systemMeta.created,
-          updated: prompt.systemMeta.updated,
-          cwd: prompt.systemMeta.cwd
-        })
-      );
-      
-      await fs.writeFile(this.systemMetaPath, lines.join('\n'), 'utf-8');
-    } catch (error) {
-      console.error('Failed to save system metadata:', error);
     }
   }
 
@@ -315,8 +117,8 @@ export class PMCManager {
   async searchPrompts(options: SearchOptions): Promise<void> {
     await this.initialize();
     
-    const prompts = await this.loadPrompts();
-    const systemMeta = await this.loadSystemMeta();
+    const prompts = await this.promptManager.loadPrompts();
+    const systemMeta = await this.promptManager.loadSystemMeta();
     
     // Combine system metadata with prompts
     const enrichedPrompts = prompts.map(prompt => ({
@@ -324,84 +126,15 @@ export class PMCManager {
       systemMeta: systemMeta.get(prompt.title) || { created: '', updated: '', cwd: '' }
     }));
 
-    let results = [...enrichedPrompts];
-
-    // Filter by directory
-    if (options.dir) {
-      results = results.filter(prompt => {
-        const cwd = prompt.systemMeta.cwd || '';
-        const matches = cwd.includes(options.dir!);
-        return options.textInverse ? !matches : matches;
-      });
-    }
-
-    // Filter by text content
-    if (options.text) {
-      const searchRegex = options.textRegexOff ? 
-        new RegExp(options.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') :
-        new RegExp(options.text, 'i');
-      
-      results = results.filter(prompt => {
-        const matches = searchRegex.test(prompt.content);
-        return options.textInverse ? !matches : matches;
-      });
-    }
-
-    // Filter by title
-    if (options.title) {
-      const titleRegex = new RegExp(options.title, 'i');
-      results = results.filter(prompt => titleRegex.test(prompt.title));
-    }
-
-    // Filter by date range
-    if (options.dateAfter || options.dateBefore) {
-      results = results.filter(prompt => {
-        const createdDate = dayjs(prompt.systemMeta.created);
-        if (!createdDate.isValid()) return true; // Include if no valid date
-        
-        if (options.dateAfter) {
-          const afterDate = this.parseDate(options.dateAfter);
-          if (afterDate && createdDate.isBefore(afterDate)) {
-            return false;
-          }
-        }
-        
-        if (options.dateBefore) {
-          const beforeDate = this.parseDate(options.dateBefore);
-          if (beforeDate && createdDate.isAfter(beforeDate)) {
-            return false;
-          }
-        }
-        
-        return true;
-      });
-    }
-
-    // Filter by metadata
-    if (options.meta) {
-      const [key, value] = options.meta.split('=');
-      results = results.filter(prompt => {
-        const userMetaValue = prompt.userMeta[key];
-        let matches = false;
-        
-        if (Array.isArray(userMetaValue)) {
-          matches = userMetaValue.includes(value);
-        } else {
-          matches = String(userMetaValue) === value;
-        }
-        
-        return options.metaInverse ? !matches : matches;
-      });
-    }
-
-    this.displayResults(results, options.contentMaxLength);
+    const results = this.searchManager.filterPrompts(enrichedPrompts, options);
+    this.displayManager.displayResults(results, options.contentMaxLength);
   }
 
   async showPrompt(options: ShowOptions): Promise<void> {
     await this.initialize();
     
-    const prompts = await this.loadPrompts();
-    const systemMeta = await this.loadSystemMeta();
+    const prompts = await this.promptManager.loadPrompts();
+    const systemMeta = await this.promptManager.loadSystemMeta();
     
     // Find exact title match
     const found = prompts.find(prompt => prompt.title === options.title);
@@ -419,7 +152,7 @@ export class PMCManager {
       systemMeta: systemMeta.get(found.title) || { created: '', updated: '', cwd: '' }
     };
     
-    this.displaySinglePrompt(enrichedPrompt);
+    this.displayManager.displaySinglePrompt(enrichedPrompt);
   }
 
   async editPrompt(options: EditOptions): Promise<void> {
@@ -428,7 +161,7 @@ export class PMCManager {
     console.log(chalk.gray(`File location: ${this.promptsPath}`));
     
     if (options.title) {
-      const prompts = await this.loadPrompts();
+      const prompts = await this.promptManager.loadPrompts();
       const found = prompts.find(p => p.title.toLowerCase().includes(options.title!.toLowerCase()));
       
       if (found) {
@@ -442,8 +175,8 @@ export class PMCManager {
   async listPrompts(options: ListOptions = {}): Promise<void> {
     await this.initialize();
     
-    const prompts = await this.loadPrompts();
-    const systemMeta = await this.loadSystemMeta();
+    const prompts = await this.promptManager.loadPrompts();
+    const systemMeta = await this.promptManager.loadSystemMeta();
     
     // Combine system metadata with prompts
     const enrichedPrompts = prompts.map(prompt => ({
@@ -452,9 +185,9 @@ export class PMCManager {
     }));
 
     if (options.onlyTitles) {
-      this.displayTitlesOnly(enrichedPrompts);
+      this.displayManager.displayTitlesOnly(enrichedPrompts);
     } else {
-      this.displayResults(enrichedPrompts);
+      this.displayManager.displayResults(enrichedPrompts);
     }
   }
 
@@ -572,11 +305,10 @@ category = "deployment"
 
     try {
       // Check if prompts.md already has substantial content (more than just welcome message)
-      if (await this.fileExists(this.promptsPath)) {
-        const existingContent = await fs.readFile(this.promptsPath, 'utf-8');
-        const promptsFromExisting = this.parseMarkdownPrompts(existingContent);
+      if (await fileExists(this.promptsPath)) {
+        const prompts = await this.promptManager.loadPrompts();
         
-        if (promptsFromExisting.length > 1 || (promptsFromExisting.length === 1 && !promptsFromExisting[0].title.includes('Welcome'))) {
+        if (prompts.length > 1 || (prompts.length === 1 && !prompts[0].title.includes('Welcome'))) {
           console.log(chalk.yellow('prompts.md already has content. Sample prompts not added.'));
           console.log(chalk.gray('To see sample format, check the documentation.'));
           return;
@@ -642,19 +374,19 @@ category = "deployment"
 
     try {
       // Remove installation directory
-      if (await this.fileExists(installDir)) {
+      if (await fileExists(installDir)) {
         await fs.rm(installDir, { recursive: true, force: true });
         console.log(chalk.gray(`✓ Removed installation directory: ${installDir}`));
       }
 
       // Remove binary symlink
-      if (await this.fileExists(binPath)) {
+      if (await fileExists(binPath)) {
         await fs.unlink(binPath);
         console.log(chalk.gray(`✓ Removed binary symlink: ${binPath}`));
       }
 
       // Remove configuration directory
-      if (await this.fileExists(pmcDir)) {
+      if (await fileExists(pmcDir)) {
         await fs.rm(pmcDir, { recursive: true, force: true });
         console.log(chalk.gray(`✓ Removed configuration directory: ${pmcDir}`));
       }
@@ -685,7 +417,7 @@ category = "deployment"
     ];
 
     for (const configFile of configFiles) {
-      if (await this.fileExists(configFile)) {
+      if (await fileExists(configFile)) {
         try {
           const content = await fs.readFile(configFile, 'utf-8');
           const lines = content.split('\n');
@@ -706,162 +438,6 @@ category = "deployment"
     }
   }
 
-  private parseDate(dateStr: string): dayjs.Dayjs | null {
-    // Try different date formats
-    const formats = [
-      'YYYY-MM-DD',
-      'YYYY-MM-DD HH:mm',
-      'YYYY-MM-DD HH:mm:ss',
-      'MM/DD/YYYY',
-      'DD/MM/YYYY'
-    ];
-    
-    // Try standard formats first
-    for (const format of formats) {
-      const parsed = dayjs(dateStr, format, true);
-      if (parsed.isValid()) {
-        return parsed;
-      }
-    }
-    
-    // Try relative time parsing
-    const now = dayjs();
-    const relativeParsing = [
-      { pattern: /(\d+)\s*days?\s*ago/i, unit: 'day' },
-      { pattern: /(\d+)\s*weeks?\s*ago/i, unit: 'week' },
-      { pattern: /(\d+)\s*months?\s*ago/i, unit: 'month' },
-      { pattern: /(\d+)\s*years?\s*ago/i, unit: 'year' },
-      { pattern: /(\d+)\s*hours?\s*ago/i, unit: 'hour' },
-      { pattern: /(\d+)\s*minutes?\s*ago/i, unit: 'minute' }
-    ];
-    
-    for (const { pattern, unit } of relativeParsing) {
-      const match = dateStr.match(pattern);
-      if (match) {
-        const amount = parseInt(match[1]);
-        return now.subtract(amount, unit as any);
-      }
-    }
-    
-    // Special cases
-    if (dateStr.toLowerCase() === 'today') {
-      return now.startOf('day');
-    }
-    if (dateStr.toLowerCase() === 'yesterday') {
-      return now.subtract(1, 'day').startOf('day');
-    }
-    if (dateStr.toLowerCase() === 'last week') {
-      return now.subtract(1, 'week').startOf('week');
-    }
-    if (dateStr.toLowerCase() === 'last month') {
-      return now.subtract(1, 'month').startOf('month');
-    }
-    
-    console.warn(chalk.yellow(`Warning: Could not parse date "${dateStr}"`));
-    return null;
-  }
-
-  private displayTitlesOnly(results: PromptEntry[]): void {
-    if (results.length === 0) {
-      console.log(chalk.yellow('No prompts found.'));
-      return;
-    }
-
-    console.log(chalk.blue(`Found ${results.length} prompt(s):\n`));
-    
-    results.forEach((prompt, index) => {
-      const dateStr = prompt.systemMeta.created ? 
-        dayjs(prompt.systemMeta.created).format('YYYY-MM-DD') : 
-        'no-date';
-      
-      console.log(chalk.cyan(`[${index + 1}]`) + ` ${prompt.title} ` + chalk.gray(`(${dateStr})`));
-    });
-    
-    console.log('');
-    console.log(chalk.gray('Use "pmc list" for detailed view or "pmc search --title <pattern>" to filter.'));
-  }
-
-  private displaySinglePrompt(prompt: PromptEntry): void {
-    console.log(chalk.cyan(`📄 ${prompt.title}`));
-    console.log('');
-    
-    if (prompt.systemMeta.created) {
-      console.log(chalk.gray(`Created: ${dayjs(prompt.systemMeta.created).format('YYYY-MM-DD HH:mm:ss')}`));
-    }
-    if (prompt.systemMeta.updated) {
-      console.log(chalk.gray(`Updated: ${dayjs(prompt.systemMeta.updated).format('YYYY-MM-DD HH:mm:ss')}`));
-    }
-    if (prompt.systemMeta.cwd) {
-      console.log(chalk.gray(`Directory: ${prompt.systemMeta.cwd}`));
-    }
-    
-    // Display user metadata
-    if (Object.keys(prompt.userMeta).length > 0) {
-      const metaEntries = Object.entries(prompt.userMeta).map(([k, v]) => {
-        if (Array.isArray(v)) {
-          return `${k}=[${v.join(', ')}]`;
-        }
-        return `${k}=${v}`;
-      });
-      console.log(chalk.gray(`Metadata: ${metaEntries.join(', ')}`));
-    }
-    
-    console.log('');
-    console.log(chalk.blue('Content:'));
-    console.log(chalk.white(prompt.content));
-    console.log('');
-  }
-
-  private displayResults(results: PromptEntry[], contentMaxLength: number = 100): void {
-    if (results.length === 0) {
-      console.log(chalk.yellow('No prompts found.'));
-      return;
-    }
-
-    console.log(chalk.blue(`Found ${results.length} prompt(s):\n`));
-
-    results.forEach((prompt, index) => {
-      console.log(chalk.cyan(`[${index + 1}] ${prompt.title}`));
-      
-      if (prompt.systemMeta.created) {
-        console.log(chalk.gray(`    Created: ${prompt.systemMeta.created}`));
-      }
-      if (prompt.systemMeta.updated) {
-        console.log(chalk.gray(`    Updated: ${prompt.systemMeta.updated}`));
-      }
-      if (prompt.systemMeta.cwd) {
-        console.log(chalk.gray(`    Directory: ${prompt.systemMeta.cwd}`));
-      }
-      
-      // Display content with controlled length
-      let contentDisplay: string;
-      if (contentMaxLength === -1) {
-        // Show full content
-        contentDisplay = prompt.content;
-      } else {
-        // Show truncated content
-        contentDisplay = prompt.content.substring(0, contentMaxLength);
-        if (prompt.content.length > contentMaxLength) {
-          contentDisplay += '...';
-        }
-      }
-      console.log(chalk.white(`    Content: ${contentDisplay}`));
-      
-      // Display user metadata
-      if (Object.keys(prompt.userMeta).length > 0) {
-        const metaEntries = Object.entries(prompt.userMeta).map(([k, v]) => {
-          if (Array.isArray(v)) {
-            return `${k}=[${v.join(', ')}]`;
-          }
-          return `${k}=${v}`;
-        });
-        console.log(chalk.gray(`    Meta: ${metaEntries.join(', ')}`));
-      }
-      
-      console.log('');
-    });
-  }
-
   async watchPrompts(options: WatchOptions = {}): Promise<void> {
     await this.initialize();
 
@@ -870,13 +446,12 @@ category = "deployment"
     console.log(chalk.gray('Press Ctrl+C to stop watching\n'));
 
     let lastModified = 0;
-    let lastPrompts: PromptEntry[] = [];
+    let lastPrompts = await this.promptManager.loadPrompts();
 
     try {
       // Get initial state
       const stats = await fs.stat(this.promptsPath);
       lastModified = stats.mtimeMs;
-      lastPrompts = await this.loadPrompts();
       
       if (options.verbose) {
         console.log(chalk.green(`✓ Initial scan: ${lastPrompts.length} prompts found`));
@@ -898,8 +473,9 @@ category = "deployment"
             console.log(chalk.yellow('📝 File changed, updating metadata...'));
           }
           
-          const currentPrompts = await this.loadPrompts();
-          await this.updateSystemMetadata(lastPrompts, currentPrompts, options.verbose);
+          const currentPrompts = await this.promptManager.loadPrompts();
+          const changedTitles = await this.promptManager.updateSystemMetadata(lastPrompts, currentPrompts, options.verbose);
+          await this.commitChanges(changedTitles);
           lastPrompts = currentPrompts;
           
           console.log(chalk.green(`✓ Updated at ${new Date().toLocaleTimeString()}`));
@@ -919,121 +495,34 @@ category = "deployment"
     });
   }
 
-  private async updateSystemMetadata(oldPrompts: PromptEntry[], newPrompts: PromptEntry[], verbose: boolean = false): Promise<string[]> {
-    const systemMeta = await this.loadSystemMeta();
-    const now = new Date().toISOString();
-    const cwd = process.cwd();
-    
-    // Create maps for easier lookup
-    const newTitles = new Set(newPrompts.map(p => p.title));
-    
-    let changes = 0;
-    const changedTitles: string[] = [];
-    
-    // Process each new prompt
-    for (const prompt of newPrompts) {
-      const existing = systemMeta.get(prompt.title);
-      
-      if (!existing) {
-        // New prompt
-        systemMeta.set(prompt.title, {
-          created: now,
-          updated: now,
-          cwd
-        });
-        changes++;
-        changedTitles.push(prompt.title);
-        
-        if (verbose) {
-          console.log(chalk.green(`  + Added: "${prompt.title}"`));
-        }
-      } else {
-        // Check if content changed by comparing with old prompts
-        const oldPrompt = oldPrompts.find(p => p.title === prompt.title);
-        if (oldPrompt && oldPrompt.content !== prompt.content) {
-          // Content changed
-          systemMeta.set(prompt.title, {
-            ...existing,
-            updated: now,
-            cwd
-          });
-          changes++;
-          changedTitles.push(prompt.title);
-          
-          if (verbose) {
-            console.log(chalk.blue(`  ~ Modified: "${prompt.title}"`));
-          }
-        }
-      }
-    }
-    
-    // Remove metadata for deleted prompts
-    for (const [title] of systemMeta) {
-      if (!newTitles.has(title)) {
-        systemMeta.delete(title);
-        changes++;
-        changedTitles.push(`${title} (deleted)`);
-        
-        if (verbose) {
-          console.log(chalk.red(`  - Removed: "${title}"`));
-        }
-      }
-    }
-    
-    // Save updated metadata if there were changes
-    if (changes > 0) {
-      const updatedPrompts = newPrompts.map(prompt => ({
-        ...prompt,
-        systemMeta: systemMeta.get(prompt.title) || { created: '', updated: '', cwd: '' }
-      }));
-      
-      await this.saveSystemMeta(updatedPrompts);
-      
-      if (verbose) {
-        console.log(chalk.gray(`  📊 ${changes} change(s) processed`));
-      }
-    }
-    
-    return changedTitles;
-  }
-
   private async autoScanChanges(): Promise<void> {
     try {
-      if (!(await this.fileExists(this.promptsPath))) {
+      if (!(await fileExists(this.promptsPath))) {
         return; // No prompts file to scan
       }
 
-      const currentHash = await this.calculateFileHash(this.promptsPath);
+      const currentHash = await calculateFileHash(this.promptsPath);
       const storedHash = await this.getStoredHash();
 
       if (currentHash !== storedHash) {
         // File has changed, need to get old state for comparison
-        const systemMeta = await this.loadSystemMeta();
-        const currentPrompts = await this.loadPrompts();
+        const systemMeta = await this.promptManager.loadSystemMeta();
+        const currentPrompts = await this.promptManager.loadPrompts();
         
         // Create old prompts from system metadata (approximation)
-        const oldPrompts: PromptEntry[] = Array.from(systemMeta.entries()).map(([title, meta]) => ({
+        const oldPrompts = Array.from(systemMeta.entries()).map(([title, meta]) => ({
           title,
           content: '', // We don't have old content, so changes will be detected by existence/non-existence
           userMeta: {},
           systemMeta: meta
         }));
 
-        const changedTitles = await this.updateSystemMetadata(oldPrompts, currentPrompts, false);
+        const changedTitles = await this.promptManager.updateSystemMetadata(oldPrompts, currentPrompts, false);
         await this.commitChanges(changedTitles);
         await this.storeHash(currentHash);
       }
     } catch (error) {
       // Silently handle errors in auto-scan to not disrupt user commands
-    }
-  }
-
-  private async calculateFileHash(filePath: string): Promise<string> {
-    try {
-      const content = await fs.readFile(filePath, 'utf-8');
-      return crypto.createHash('sha256').update(content).digest('hex');
-    } catch (error) {
-      return '';
     }
   }
 
@@ -1065,7 +554,7 @@ category = "deployment"
         await this.git.initialize();
         
         // Initial commit with prompts.md
-        if (await this.fileExists(this.promptsPath)) {
+        if (await fileExists(this.promptsPath)) {
           await this.git.addAndCommit('Initial PMC setup');
         }
       }
@@ -1081,10 +570,10 @@ category = "deployment"
     }
 
     try {
-      let message = this.config.git.commitMessageFormat;
+      let message: string;
       
       if (changedTitles.length === 1) {
-        message = message.replace('{title}', changedTitles[0]);
+        message = formatCommitMessage(this.config.git.commitMessageFormat, changedTitles[0]);
       } else if (changedTitles.length > 1) {
         message = `Update ${changedTitles.length} prompts`;
       } else {
@@ -1097,91 +586,24 @@ category = "deployment"
     }
   }
 
+  // Version control command delegates
   async promptHistory(options: HistoryOptions): Promise<void> {
     await this.initialize();
-
-    if (!this.config.git.enabled) {
-      console.log(chalk.yellow('Git version control is disabled. Enable it in config to use history features.'));
-      return;
-    }
-
-    const history = await this.git.getHistory(options.count || 10);
-    
-    if (history.length === 0) {
-      console.log(chalk.yellow('No version history found.'));
-      return;
-    }
-
-    console.log(chalk.blue(`📚 Prompt History (${history.length} entries):\n`));
-    
-    history.forEach((entry, index) => {
-      console.log(chalk.cyan(`[${index + 1}] ${entry.hash}`) + chalk.gray(` (${entry.date}) `) + entry.message);
-    });
+    return this.versionCommands.history(options);
   }
 
   async promptDiff(options: DiffOptions): Promise<void> {
     await this.initialize();
-
-    if (!this.config.git.enabled) {
-      console.log(chalk.yellow('Git version control is disabled. Enable it in config to use diff features.'));
-      return;
-    }
-
-    const diff = await this.git.getDiff(options.version1, options.version2);
-    
-    if (!diff) {
-      console.log(chalk.yellow('No differences found.'));
-      return;
-    }
-
-    console.log(chalk.blue('📊 Diff:'));
-    console.log(diff);
+    return this.versionCommands.diff(options);
   }
 
   async promptRestore(options: RestoreOptions): Promise<void> {
     await this.initialize();
-
-    if (!this.config.git.enabled) {
-      console.log(chalk.yellow('Git version control is disabled. Enable it in config to use restore features.'));
-      return;
-    }
-
-    const content = await this.git.showVersion(options.version);
-    
-    if (!content) {
-      console.log(chalk.red(`❌ Version "${options.version}" not found.`));
-      return;
-    }
-
-    let shouldRestore = options.confirm;
-
-    if (!shouldRestore) {
-      const { confirmRestore } = await inquirer.prompt([
-        {
-          type: 'confirm',
-          name: 'confirmRestore',
-          message: `Are you sure you want to restore prompts.md to version "${options.version}"?`,
-          default: false
-        }
-      ]);
-      shouldRestore = confirmRestore;
-    }
-
-    if (!shouldRestore) {
-      console.log(chalk.green('Restore cancelled.'));
-      return;
-    }
-
-    try {
-      await fs.writeFile(this.promptsPath, content, 'utf-8');
-      await this.git.addAndCommit(`Restore to version ${options.version}`);
-      console.log(chalk.green(`✓ Restored prompts.md to version "${options.version}"`));
-    } catch (error) {
-      console.error(chalk.red('❌ Failed to restore:'), error);
-    }
+    return this.versionCommands.restore(options);
   }
 
   async promptVersions(options: VersionsOptions): Promise<void> {
-    await this.promptHistory({ count: options.count });
+    await this.initialize();
+    return this.versionCommands.versions(options);
   }
 }
