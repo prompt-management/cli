@@ -6,12 +6,13 @@ import { PMCManager } from './pmc-manager';
 import { SearchOptions, EditOptions, GenerateOptions, UninstallOptions, CreateOptions, ListOptions, ShowOptions, WatchOptions, HistoryOptions, DiffOptions, RestoreOptions, VersionsOptions } from './types';
 
 const program = new Command();
-const pmc = new PMCManager();
+let pmc: PMCManager;
 
 program
   .name('pmc')
   .description('Prompt Management CLI - A tool for managing AI prompts')
-  .version('1.0.0');
+  .version('1.0.0')
+  .option('--prompts-file <path>', 'Specify custom prompts.md file path');
 
 program
   .command('create')
@@ -151,6 +152,10 @@ program
   });
 
 program.parse();
+
+// Initialize PMC with custom prompts file if specified
+const options = program.opts();
+pmc = new PMCManager(options.promptsFile);
 
 if (!process.argv.slice(2).length) {
   pmc.createPrompt();

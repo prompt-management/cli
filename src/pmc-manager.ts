@@ -23,10 +23,10 @@ export class PMCManager {
   private searchManager: SearchManager;
   private versionCommands: VersionCommands;
 
-  constructor() {
+  constructor(customPromptsPath?: string) {
     const pmcDir = path.join(os.homedir(), '.pmc');
     this.configPath = path.join(pmcDir, 'pmc-config.yml');
-    this.promptsPath = path.join(pmcDir, 'prompts.md');
+    this.promptsPath = customPromptsPath ? path.resolve(customPromptsPath) : path.join(pmcDir, 'prompts.md');
     this.systemMetaPath = path.join(pmcDir, 'prompts-system-meta.jsonl');
     this.hashPath = path.join(pmcDir, '.prompts-hash');
     this.config = {
